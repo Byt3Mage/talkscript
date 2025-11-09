@@ -1,21 +1,20 @@
 use crate::vm::instruction::{Instruction, Opcode};
-use crate::vm::instruction::{ile, imul, isub, jmp_if_not, load, mov, ret, tail_call};
-use crate::vm::vm_types::FunctionInfo;
-use std::time::Instant;
+use crate::vm::vm_types::{FunctionInfo, VMType};
 
-mod heap;
+pub mod heap;
 pub mod instruction;
-mod stack;
-pub(crate) mod vm_types;
+pub mod vm_types;
+
+type Value = u64;
 
 #[derive(Debug, Copy, Clone)]
 pub enum VMError {
     Error,
 }
 
-pub type VMResult = Result<u64, VMError>;
+pub type VMResult = Result<Value, VMError>;
 
-struct CallFrame {
+pub struct Frame {
     /// Where in the instructions to return after this call.
     ret_pc: usize,
     /// Offset into [VM] registers where this function starts.
@@ -26,27 +25,42 @@ struct CallFrame {
     num_regs: u8,
 }
 
-struct Constants {
-    values: Vec<u64>,
+pub struct Constants {
+    values: Vec<Value>,
     functions: Vec<FunctionInfo>,
 }
 
 impl Constants {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             values: vec![],
             functions: vec![],
         }
     }
+
+    #[inline]
+    pub fn push_value(&mut self, value: impl VMType) -> usize {
+        let idx = self.values.len();
+        self.values.push(value.to_value());
+        idx
+    }
+
+    #[inline]
+    pub fn push_function(&mut self, func: FunctionInfo) -> usize {
+        let idx = self.functions.len();
+        self.functions.push(func);
+        idx
+    }
 }
 
 pub struct VM {
-    registers: Vec<u64>,
-    constants: Constants,
-    call_stack: Vec<CallFrame>,
-    base_reg: usize,
-    program: Vec<Instruction>,
-    pc: usize,
+    pub registers: Vec<u64>,
+    pub constants: Constants,
+    pub call_stack: Vec<Frame>,
+    /// base register index of current frame
+    pub base_reg: usize,
+    pub program: Vec<Instruction>,
+    pub pc: usize,
 }
 
 impl VM {
@@ -185,30 +199,28 @@ impl VM {
     fn exec_call(&mut self, instr: Instruction) {
         let ret_reg = instr.a();
         let func = &self.constants.functions[instr.bx() as usize];
+        let base = self.registers.len();
 
-        // Create a new register window
-        let new_base_reg = self.registers.len();
-        self.registers
-            .resize(new_base_reg + func.num_regs as usize, 0);
+        self.registers.resize(base + func.num_regs as usize, 0);
 
         // Copy args from caller into callee registers
         // Call convention states that args are in caller registers: ret + 1..=ret + arity
         let nargs = func.arity as usize;
-        let src_start = self.base_reg + (ret_reg as usize + 1);
-        self.registers
-            .copy_within(src_start..src_start + nargs, new_base_reg + 1);
+        let start = self.base_reg + (ret_reg as usize + 1);
+
+        self.registers.copy_within(start..start + nargs, base + 1);
 
         // Push call frame
-        self.call_stack.push(CallFrame {
+        self.call_stack.push(Frame {
             ret_pc: self.pc,
             ret_reg,
-            base_reg: new_base_reg,
+            base_reg: base,
             num_regs: func.num_regs,
         });
 
         // Jump to function entry point
         self.pc = func.entry_pc;
-        self.base_reg = new_base_reg;
+        self.base_reg = base;
     }
 
     fn exec_tail_call(&mut self, instr: Instruction) {
@@ -224,7 +236,7 @@ impl VM {
         self.pc = func.entry_pc;
     }
 
-    pub fn run_function(&mut self, func: &FunctionInfo, args: &[u64]) -> VMResult {
+    pub fn run_function(&mut self, func: &FunctionInfo, args: &[Value]) -> VMResult {
         assert_eq!(func.arity as usize, args.len(), "Incorrect argument count");
 
         // Create a new register window
@@ -236,7 +248,7 @@ impl VM {
         self.registers[dst_start..dst_start + args.len()].copy_from_slice(args);
 
         // Push synthetic frame with ret_pc = usize::MAX
-        self.call_stack.push(CallFrame {
+        self.call_stack.push(Frame {
             ret_pc: usize::MAX,
             ret_reg: 0,
             base_reg,
@@ -275,7 +287,7 @@ impl VM {
                 Opcode::FSUB => self.exec_fsub(instr),
 
                 // Load operations
-                Opcode::LOAD => self.exec_load(instr),
+                Opcode::LOAD_INT => self.exec_load(instr),
 
                 // Jump operations
                 Opcode::JMP => self.exec_jump(instr),
@@ -310,59 +322,4 @@ impl VM {
 
         Err(VMError::Error)
     }
-}
-
-#[test]
-fn test_vm() {
-    fn fact(n: i32, acc: i32) -> i32 {
-        if n <= 1 { acc } else { fact(n - 1, acc * n) }
-    }
-
-    println!("{}", fact(7, 1));
-
-    let program = vec![
-        // fn fact(n: int, acc: int) -> int
-        // r1 = n, r2 = acc
-        load(3, 0),       //r3 = 1
-        ile(4, 1, 3),     //r3 = n <= 1
-        jmp_if_not(4, 5), // jum to tail call
-        mov(0, 2),
-        ret(),
-        // tail_call:
-        isub(4, 1, 3), //r4 = n - 1
-        imul(5, 1, 2), //r5 = n * acc
-        mov(1, 4),
-        mov(2, 5),
-        tail_call(0),
-    ];
-
-    let mut constants = Constants::new();
-    constants.values.push(1i64 as u64);
-
-    constants.functions.push(FunctionInfo {
-        entry_pc: 0,
-        arity: 2,
-        num_regs: 6,
-    });
-
-    let mut vm = VM {
-        registers: vec![],
-        constants,
-        call_stack: vec![],
-        base_reg: 0,
-        pc: 0,
-        program,
-    };
-
-    let main = FunctionInfo {
-        entry_pc: 0,
-        arity: 2,
-        num_regs: 6,
-    };
-
-    let start = Instant::now();
-    let result = vm.run_function(&main, &[7i64 as u64, 1i64 as u64]).unwrap();
-    let result = result as i64;
-    let duration = start.elapsed();
-    println!("fibonacci({}) = {} | Time: {:?}", 3, result, duration);
 }

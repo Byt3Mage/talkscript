@@ -219,6 +219,7 @@ impl<'a> Lexer<'a> {
 
     fn make_minus(&mut self, start_byte: usize) -> Token<'a> {
         self.advance(); // Consume '='
+
         match self.current {
             Some((_, '=')) => {
                 self.advance();
@@ -247,6 +248,7 @@ impl<'a> Lexer<'a> {
     fn make_string(&mut self, start_byte: usize) -> LexResult<'a> {
         let start_line = self.line;
         let start_col = self.column;
+
         self.advance(); // Skip opening quote
 
         let mut escape = false;
@@ -262,6 +264,7 @@ impl<'a> Lexer<'a> {
                 }
                 '"' if !escape => {
                     self.advance();
+
                     return Ok(self.make_token(
                         TokenType::StringLit,
                         start_byte,

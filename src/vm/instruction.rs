@@ -11,7 +11,12 @@ macro_rules! define_opcodes {
 }
 
 define_opcodes! {
+    // Move between registers
     MOV = 0,
+    // Move from immediate 16-bit value
+    MOV_IMM = 1,
+    // Move from value in constants table
+    MOV_CST = 2,
 
     // Integer arithmetic
     IADD = 10,
@@ -44,7 +49,7 @@ define_opcodes! {
     FGE = 40,
 
     // Load operations
-    LOAD = 50,
+    LOAD_INT = 50,
     LOAD_FLT = 51,
     LOAD_BOL = 52,
     LOAD_PTR = 53,
@@ -243,8 +248,8 @@ pub fn fge(r_dst: u8, r_a: u8, r_b: u8) -> Instruction {
 
 // Load operations (ABx)
 #[inline(always)]
-pub fn load(r_dst: u8, index: u16) -> Instruction {
-    Instruction::encode_abx(Opcode::LOAD, r_dst, index)
+pub fn load_int(r_dst: u8, index: u16) -> Instruction {
+    Instruction::encode_abx(Opcode::LOAD_INT, r_dst, index)
 }
 
 #[inline(always)]
