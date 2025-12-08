@@ -1,409 +1,566 @@
-use ahash::AHashSet;
+use std::{alloc::Layout, ptr::NonNull};
+
 use simple_ternary::tnr;
 
-use crate::{type_registry::TypeRegistry, vm::vm_types::Ptr};
+use crate::vm::{
+    allocator::{Allocator, BumpAllocator},
+    async_runtime::Task,
+    object::*,
+};
 
-/// ### Layout
-/// * type_id(16)
-/// * fwd_ptr(46)
-/// * fwd(1)
-/// * mark(1)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GCColor {
+    Gray = 0b000,
+    White0 = 0b001,
+    White1 = 0b010,
+    Black = 0b100,
+}
+
+impl GCColor {
+    #[inline]
+    pub const fn is_white(self) -> bool {
+        matches!(self, GCColor::White0 | GCColor::White1)
+    }
+
+    #[inline]
+    pub const fn is_black(self) -> bool {
+        matches!(self, GCColor::Black)
+    }
+
+    #[inline]
+    pub const fn is_gray(self) -> bool {
+        matches!(self, GCColor::Gray)
+    }
+
+    #[inline]
+    pub const fn other_white(self) -> GCColor {
+        match self {
+            GCColor::White0 => GCColor::White1,
+            GCColor::White1 => GCColor::White0,
+            _ => panic!("other_white called on non-white color"),
+        }
+    }
+}
+
+pub struct GCHeader {
+    color: GCColor,
+    obj_type: ObjType,
+    next: Option<GCPtr>,
+    layout: Layout,
+}
+
+impl GCHeader {
+    #[inline(always)]
+    pub fn ty(&self) -> ObjType {
+        self.obj_type
+    }
+}
+
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-struct Header(u64);
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+pub struct GCPtr(NonNull<GCHeader>);
 
-impl Header {
-    const MARK_BIT: u64 = 1 << 0;
-    const FWD_BIT: u64 = 1 << 1;
-
-    // high 16 bits
-    const TYPE_SHIFT: u64 = 48;
-    const TYPE_MASK: u64 = 0xFFFF;
-
-    // next 46 bits(forwarding offset from base)
-    const FWD_SHIFT: u64 = 2;
-    const FWD_MASK: u64 = 0x3FFF_FFFF_FFFF; // 46 bits
-
+impl GCPtr {
     #[inline(always)]
-    const fn new(type_id: u16) -> Self {
-        Self((type_id as u64) << Self::TYPE_SHIFT)
+    pub(super) fn new(ptr: NonNull<u8>) -> Self {
+        Self(ptr.cast())
     }
 
     #[inline(always)]
-    const fn type_id(&self) -> u16 {
-        ((self.0 >> Self::TYPE_SHIFT) & Self::TYPE_MASK) as u16
+    pub(super) fn as_ptr<T>(self) -> NonNull<T> {
+        self.0.cast()
     }
 
     #[inline(always)]
-    const fn is_marked(&self) -> bool {
-        (self.0 & Self::MARK_BIT) != 0
+    pub(super) fn hdr(&self) -> &GCHeader {
+        unsafe { self.0.as_ref() }
     }
 
     #[inline(always)]
-    const fn mark(&mut self) {
-        self.0 |= Self::MARK_BIT;
+    pub(super) fn hdr_mut(&mut self) -> &mut GCHeader {
+        unsafe { self.0.as_mut() }
     }
 
     #[inline(always)]
-    const fn unmark(&mut self) {
-        self.0 &= !Self::MARK_BIT;
+    pub(super) fn ty(&self) -> ObjType {
+        self.hdr().ty()
     }
 
-    #[inline(always)]
-    const fn is_forwarded(&self) -> bool {
-        (self.0 & Self::FWD_BIT) != 0
+    pub(super) fn as_ref<T>(&self) -> &T {
+        unsafe { self.0.cast().as_ref() }
     }
 
-    #[inline(always)]
-    const fn clear_forwarded(&mut self) {
-        self.0 &= !Self::FWD_BIT;
-    }
-
-    #[inline(always)]
-    const fn set_forwarding_ptr(&mut self, ptr: Ptr) {
-        let pos = ptr.position() & Self::FWD_MASK;
-        let old = self.0 & !((Self::FWD_MASK << Self::FWD_SHIFT) | Self::FWD_BIT);
-        self.0 = old | (pos << Self::FWD_SHIFT) | Self::FWD_BIT;
-    }
-
-    #[inline(always)]
-    const fn get_forwarding_ptr(&self) -> Ptr {
-        // forwarded pointers are always old
-        Ptr::old((self.0 >> Self::FWD_SHIFT) & Self::FWD_MASK)
+    pub(super) fn as_mut<T>(&mut self) -> &mut T {
+        unsafe { self.0.cast().as_mut() }
     }
 }
 
-#[inline(always)]
-const fn field_slot(ptr: Ptr, offset: u16) -> usize {
-    (ptr.position() as usize) + 1 + (offset as usize)
+const MAX_THRESHOLD: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GCState {
+    Pause,
+    Propagate,
+    PropagateAgain,
+    Atomic,
+    Sweep,
 }
 
-pub struct SingleGenHeap {
-    young: Vec<u64>,
-    young_top: usize,
-    old: Vec<u64>,
-    old_top: usize,
-    remembered: AHashSet<Ptr>,
-}
-
-impl SingleGenHeap {
+impl GCState {
     #[inline(always)]
-    pub fn new(young_slots: usize, old_slots: usize) -> Self {
+    fn keep_invariant(self) -> bool {
+        matches!(self, Self::Propagate | Self::PropagateAgain | Self::Atomic)
+    }
+}
+
+pub struct Heap<A: Allocator = BumpAllocator> {
+    allocator: A,
+    objects: Option<GCPtr>,
+    gray: Option<GCPtr>,
+    gray_again: Option<GCPtr>,
+    bytes_allocated: usize,
+    gc_threshold: usize,
+    gc_state: GCState,
+    current_white: GCColor,
+}
+
+impl Heap {
+    pub fn new() -> Self {
         Self {
-            young: vec![0; young_slots],
-            young_top: 0,
-            old: vec![0; old_slots],
-            old_top: 0,
-            remembered: AHashSet::new(),
+            allocator: BumpAllocator::new(),
+            objects: None,
+            gray: None,
+            gray_again: None,
+            bytes_allocated: 0,
+            gc_threshold: MAX_THRESHOLD,
+            gc_state: GCState::Pause,
+            current_white: GCColor::White0,
         }
     }
 
     #[inline]
-    pub fn alloc(
-        &mut self,
-        type_id: u16,
-        types: &TypeRegistry,
-        roots: &mut [Ptr],
-    ) -> Result<Ptr, HeapError> {
-        let slots = 1 + types.get_info(type_id).num_fields as usize;
+    pub(super) fn alloc_array(&mut self, is_ptr: bool, elems: &[Value]) -> GCPtr {
+        let len = elems.len();
+        let size = size_of::<ObjArray>() + (len * size_of::<Value>());
+        let layout = Layout::from_size_align(size, align_of::<ObjArray>()).unwrap();
 
-        // Try allocate
-        if self.young_top + slots <= self.young.len() {
-            let pos = self.young_top;
-            self.young_top += slots;
-            self.young[pos] = Header::new(type_id).0;
-            return Ok(Ptr::nursery(pos as u64));
-        }
+        unsafe {
+            let ptr = self.allocator.alloc(layout);
 
-        // Nursery full, try minor GC
-        self.minor_gc(roots, types)?;
+            ptr.cast().write(ObjArray::new(
+                GCHeader {
+                    color: self.current_white,
+                    obj_type: tnr! {is_ptr => ObjType::PtrArray : ObjType::Array},
+                    layout,
+                    next: self.objects,
+                },
+                len as u64,
+            ));
 
-        // Retry allocation
-        if self.young_top + slots <= self.young.len() {
-            let pos = self.young_top;
-            self.young_top += slots;
-            self.young[pos] = Header::new(type_id).0;
-            return Ok(Ptr::nursery(pos as u64));
-        }
+            let data = ptr.add(size_of::<ObjArray>()).cast().as_ptr();
+            std::ptr::copy_nonoverlapping(elems.as_ptr(), data, len);
 
-        Err(HeapError::YoungOutOfMemory)
-    }
+            let ptr = GCPtr::new(ptr);
+            self.objects = Some(ptr);
+            self.bytes_allocated += size;
 
-    #[inline(always)]
-    pub fn get_field(&self, ptr: Ptr, offset: u16) -> u64 {
-        let slot = field_slot(ptr, offset);
-        tnr! {ptr.is_old() => self.old[slot] : self.young[slot]}
-    }
-
-    #[inline(always)]
-    pub fn get_ptr_field(&self, ptr: Ptr, offset: u16) -> Ptr {
-        let slot = field_slot(ptr, offset);
-        Ptr::from_raw(tnr! {ptr.is_old() => self.old[slot] : self.young[slot]})
-    }
-
-    pub fn set_field(&mut self, ptr: Ptr, offset: u16, value: u64) {
-        let slot = field_slot(ptr, offset);
-        if ptr.is_old() {
-            self.old[slot] = value;
-        } else {
-            self.young[slot] = value;
+            ptr
         }
     }
 
-    pub fn set_ptr_field(&mut self, ptr: Ptr, offset: u16, value: Ptr) {
-        let slot = field_slot(ptr, offset);
-        if ptr.is_old() {
-            self.old[slot] = value.raw();
-            // Write barrier: old -> young pointer
-            if !value.is_old() {
-                self.remembered.insert(ptr);
-            }
-        } else {
-            self.young[slot] = value.raw();
+    #[inline]
+    pub(super) fn alloc_list(&mut self, is_ptr: bool, elems: &[Value]) -> GCPtr {
+        let layout = Layout::new::<ObjList>();
+
+        unsafe {
+            let ptr = self.allocator.alloc(layout);
+
+            ptr.cast().write(ObjList::new(
+                GCHeader {
+                    color: self.current_white,
+                    obj_type: tnr! {is_ptr => ObjType::PtrList : ObjType::List},
+                    layout,
+                    next: self.objects,
+                },
+                elems,
+            ));
+
+            let ptr = GCPtr::new(ptr);
+            self.objects = Some(ptr);
+            self.bytes_allocated += layout.size();
+
+            ptr
         }
     }
 
-    fn copy_to_old(&mut self, ptr: Ptr, registry: &TypeRegistry) -> Result<Ptr, HeapError> {
-        debug_assert!(!ptr.is_old(), "only young objects should be copied");
+    #[inline]
+    pub(super) fn alloc_struct(&mut self, ptr_mask: u64, words: &[Value]) -> GCPtr {
+        let word_size = words.len();
+        let size = size_of::<ObjStruct>() + (word_size * size_of::<Value>());
+        let layout = Layout::from_size_align(size, align_of::<ObjStruct>()).unwrap();
 
-        let pos = ptr.position() as usize;
-        let hdr = Header(self.young[pos]);
+        unsafe {
+            let ptr = self.allocator.alloc(layout);
 
-        if hdr.is_forwarded() {
-            return Ok(hdr.get_forwarding_ptr());
+            ptr.cast().write(ObjStruct::new(
+                GCHeader {
+                    color: self.current_white,
+                    obj_type: tnr! {ptr_mask != 0 => ObjType::PtrStruct : ObjType::Struct},
+                    layout,
+                    next: self.objects,
+                },
+                word_size as u64,
+                ptr_mask,
+            ));
+
+            let data = ptr.add(size_of::<ObjStruct>()).cast().as_ptr();
+            std::ptr::copy_nonoverlapping(words.as_ptr(), data, word_size);
+
+            let ptr = GCPtr::new(ptr);
+
+            self.objects = Some(ptr);
+            self.bytes_allocated += size;
+
+            ptr
         }
-
-        let slots = 1 + registry.get_info(hdr.type_id()).num_fields as usize;
-        let start = self.old_top;
-        let end = start + slots;
-
-        if end > self.old.len() {
-            return Err(HeapError::OldOutOfMemory);
-        }
-
-        self.old_top = end;
-        self.old[start..end].copy_from_slice(&self.young[pos..pos + slots]);
-
-        let new_ptr = Ptr::old(start as u64);
-
-        self.young[pos] = {
-            let mut h = hdr;
-            h.set_forwarding_ptr(new_ptr);
-            h.0
-        };
-
-        Ok(new_ptr)
     }
 
-    pub fn minor_gc(&mut self, roots: &mut [Ptr], types: &TypeRegistry) -> Result<(), HeapError> {
-        let scan_start = self.old_top;
+    #[inline]
+    pub(super) fn alloc_string(&mut self, str: &str) -> GCPtr {
+        let layout = Layout::new::<ObjString>();
 
-        for root in roots.iter_mut() {
-            if !root.is_old() && (root.position() as usize) < self.young_top {
-                *root = self.copy_to_old(*root, types)?;
-            }
+        unsafe {
+            let ptr = self.allocator.alloc(layout);
+
+            ptr.cast().write(ObjString::new(
+                GCHeader {
+                    color: self.current_white,
+                    obj_type: ObjType::String,
+                    layout,
+                    next: self.objects,
+                },
+                String::from(str),
+            ));
+
+            let ptr = GCPtr::new(ptr);
+            self.objects = Some(ptr);
+            self.bytes_allocated += layout.size();
+
+            ptr
         }
-
-        for old_ptr in self.remembered.drain().collect::<Vec<_>>() {
-            self.scan_object(old_ptr, types)?;
-        }
-
-        // Cheney scan: process copied objects
-        let mut scan = scan_start;
-        while scan < self.old_top {
-            let ptr = Ptr::old(scan as u64);
-            self.scan_object(ptr, types)?;
-
-            let hdr = Header(self.old[scan]);
-            scan += 1 + types.get_info(hdr.type_id()).num_fields as usize;
-        }
-
-        self.young_top = 0;
-
-        Ok(())
     }
 
-    fn scan_object(&mut self, ptr: Ptr, types: &TypeRegistry) -> Result<(), HeapError> {
-        debug_assert!(ptr.is_old(), "only old objects should be scanned");
+    #[inline]
+    pub(super) fn alloc_task(&mut self, data: Task) -> GCPtr {
+        let layout = Layout::new::<ObjTask>();
 
-        let pos = ptr.position() as usize;
-        let info = types.get_info(Header(self.old[pos]).type_id());
+        unsafe {
+            let ptr = self.allocator.alloc(layout);
 
-        for &idx in &info.ptr_fields {
-            let off = pos + 1 + (idx as usize);
-            let child = Ptr::from_raw(self.old[off]);
+            ptr.cast().write(ObjTask::new(
+                GCHeader {
+                    color: self.current_white,
+                    obj_type: ObjType::Task,
+                    layout,
+                    next: self.objects,
+                },
+                data,
+            ));
 
-            if !child.is_old() && (child.position() as usize) < self.young_top {
-                let new_ptr = self.copy_to_old(child, types)?;
-                self.old[off] = new_ptr.raw();
-            }
+            let ptr = GCPtr::new(ptr);
+            self.objects = Some(ptr);
+            self.bytes_allocated += layout.size();
+
+            ptr
         }
-
-        Ok(())
     }
 
-    pub fn major_gc(&mut self, roots: &mut [Ptr], registry: &TypeRegistry) {
-        self.mark(roots, registry);
-        self.compute_forwarding(registry);
-        self.update_references(roots, registry);
-        self.compact(registry);
-    }
-
-    fn mark(&mut self, roots: &[Ptr], registry: &TypeRegistry) {
-        let mut worklist = Vec::new();
+    fn mark_roots(&mut self, roots: &[Value]) {
+        self.gray = None;
+        self.gray_again = None;
 
         for &root in roots {
-            if root.is_old() {
-                worklist.push(root);
-            }
+            self.mark_object(root.get());
         }
 
-        let mut scan = 0;
-        while scan < self.young_top {
-            let info = registry.get_info(Header(self.young[scan]).type_id());
+        self.gc_state = GCState::Propagate;
+    }
 
-            for &idx in &info.ptr_fields {
-                // Direct indexing. We know we're in nursery.
-                let off = scan + 1 + (idx as usize);
-                let child = Ptr::from_raw(self.young[off]);
+    fn mark_object(&mut self, mut obj: GCPtr) {
+        let header = obj.hdr_mut();
 
-                if child.is_old() {
-                    worklist.push(child);
-                }
-            }
-
-            scan += 1 + (info.num_fields as usize);
+        if !header.color.is_white() {
+            return;
         }
 
-        // Cheney's algorithm: Breadth-first tree walk to mark objects.
-        while let Some(ptr) = worklist.pop() {
-            let pos = ptr.position() as usize;
-            let mut hdr = Header(self.old[pos]);
+        header.color = GCColor::Gray;
 
-            if hdr.is_marked() {
-                continue;
+        match header.obj_type {
+            ObjType::PtrArray => {
+                obj.as_mut::<ObjArray>().gc_list = self.gray;
+                self.gray = Some(obj)
             }
-
-            hdr.mark();
-            self.old[pos] = hdr.0;
-
-            let info = registry.get_info(hdr.type_id());
-
-            for &idx in &info.ptr_fields {
-                let off = pos + 1 + (idx as usize);
-                let child = Ptr::from_raw(self.old[off]);
-
-                if child.is_old() {
-                    worklist.push(child)
-                }
+            ObjType::PtrList => {
+                obj.as_mut::<ObjList>().gc_list = self.gray;
+                self.gray = Some(obj)
+            }
+            ObjType::PtrStruct => {
+                obj.as_mut::<ObjStruct>().gc_list = self.gray;
+                self.gray = Some(obj)
+            }
+            ObjType::Task => todo!("mark task"),
+            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {
+                header.color = GCColor::Black
             }
         }
     }
 
-    fn compute_forwarding(&mut self, registry: &TypeRegistry) {
-        let mut pos = 0;
-        let mut new_pos = 0;
-
-        while pos < self.old_top {
-            let mut hdr = Header(self.old[pos]);
-            let slots = 1 + registry.get_info(hdr.type_id()).num_fields as usize;
-
-            if hdr.is_marked() {
-                hdr.set_forwarding_ptr(Ptr::old(new_pos as u64));
-                self.old[pos] = hdr.0;
-                new_pos += slots;
+    fn propagate_mark(&mut self, mut obj: GCPtr) -> usize {
+        match obj.ty() {
+            ObjType::PtrArray => {
+                let arr = obj.as_mut::<ObjArray>();
+                self.gray = arr.gc_list;
             }
-
-            pos += slots;
+            ObjType::PtrList => {
+                let list = obj.as_mut::<ObjList>();
+                self.gray = list.gc_list;
+            }
+            ObjType::PtrStruct => {
+                let st = obj.as_mut::<ObjStruct>();
+                self.gray = st.gc_list;
+            }
+            ObjType::Array | ObjType::List | ObjType::Struct | ObjType::String | ObjType::Task => {
+                unreachable!("non-gray object in gray list")
+            }
         }
+
+        obj.hdr_mut().color = GCColor::Black;
+        self.trace_children(obj);
+        obj.hdr().layout.size()
     }
 
-    fn update_references(&mut self, roots: &mut [Ptr], registry: &TypeRegistry) {
-        for root in roots.iter_mut() {
-            if root.is_old() {
-                let hdr = Header(self.old[root.position() as usize]);
-                if hdr.is_forwarded() {
-                    *root = hdr.get_forwarding_ptr()
-                }
-            }
+    fn propagate_all(&mut self) -> usize {
+        let mut work = 0;
+
+        while let Some(obj) = self.gray {
+            work += self.propagate_mark(obj);
         }
 
-        let mut scan = 0;
-        while scan < self.young_top {
-            let hdr = Header(self.young[scan]);
-            let info = registry.get_info(hdr.type_id());
+        work
+    }
 
-            for &idx in &info.ptr_fields {
-                let off = scan + 1 + (idx as usize);
-                let val = Ptr::from_raw(self.young[off]);
-
-                if val.is_old() {
-                    let old_hdr = Header(self.old[val.position() as usize]);
-                    if old_hdr.is_forwarded() {
-                        self.young[off] = old_hdr.get_forwarding_ptr().raw();
+    fn trace_children(&mut self, obj: GCPtr) {
+        match obj.ty() {
+            ObjType::PtrArray => {
+                let arr = obj.as_ref::<ObjArray>();
+                for v in arr.iter() {
+                    self.mark_object(v.get());
+                }
+            }
+            ObjType::PtrList => {
+                let list = obj.as_ref::<ObjList>();
+                for v in list.iter() {
+                    self.mark_object(v.get());
+                }
+            }
+            ObjType::PtrStruct => {
+                let st = obj.as_ref::<ObjStruct>();
+                for (i, &v) in st.fields().iter().enumerate() {
+                    if st.has_ptr_at(i) {
+                        self.mark_object(v.get());
                     }
                 }
             }
-
-            scan += 1 + info.num_fields as usize;
-        }
-
-        scan = 0;
-
-        while scan < self.old_top {
-            let hdr = Header(self.old[scan]);
-            let info = registry.get_info(hdr.type_id());
-
-            if hdr.is_marked() {
-                for &idx in &info.ptr_fields {
-                    let off = scan + 1 + (idx as usize);
-                    let val = Ptr::from_raw(self.old[off]);
-
-                    if val.is_old() {
-                        let tgt_hdr = Header(self.old[val.position() as usize]);
-                        if tgt_hdr.is_forwarded() {
-                            self.old[off] = tgt_hdr.get_forwarding_ptr().raw();
-                        }
-                    }
-                }
-            }
-
-            scan += 1 + info.num_fields as usize
+            ObjType::Task => todo!("trace task children"),
+            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {}
         }
     }
 
-    fn compact(&mut self, registry: &TypeRegistry) {
-        let mut new_pos = 0;
-        let mut scan = 0;
+    fn atomic(&mut self, roots: &[Value]) -> usize {
+        let mut work = 0;
 
-        while scan < self.old_top {
-            let hdr = Header(self.old[scan]);
-            let slots = 1 + registry.get_info(hdr.type_id()).num_fields as usize;
+        for &root in roots {
+            self.mark_object(root.get());
+        }
 
-            if hdr.is_marked() {
-                // Move object to new location if needed
-                if scan != new_pos {
-                    self.old.copy_within(scan..scan + slots, new_pos);
-                }
+        // TODO: remark upvalues
+        // traverse objects caught by write barrier.
+        work += self.propagate_all();
 
-                // Clear mark and forwarding bits for next GC cycle
-                let mut new_hdr = Header(self.old[new_pos]);
-                new_hdr.unmark();
-                new_hdr.clear_forwarded();
-                self.old[new_pos] = new_hdr.0;
+        // remark gray again
+        std::mem::swap(&mut self.gray, &mut self.gray_again);
+        work += self.propagate_all();
 
-                new_pos += slots;
-                scan += slots;
+        self.current_white = self.current_white.other_white();
+        self.gc_state = GCState::Sweep;
+
+        work
+    }
+
+    fn sweep(&mut self, limit: usize) -> usize {
+        const SWEEP_COST: usize = 16; // Cost per object swept
+
+        let mut work = 0;
+        let mut prev = None;
+        let mut curr = self.objects;
+
+        while let Some(mut obj) = curr
+            && work < limit
+        {
+            let next = obj.hdr().next;
+            let color = obj.hdr().color;
+
+            if color == self.current_white.other_white() {
+                self.free_object(obj, prev);
             } else {
-                scan += slots;
+                obj.hdr_mut().color = self.current_white;
+                prev = Some(obj);
             }
+
+            curr = next;
+            work += SWEEP_COST;
         }
 
-        self.old_top = new_pos;
-    }
-}
+        if curr.is_none() {
+            self.gc_state = GCState::Pause;
+        }
 
-pub enum HeapError {
-    YoungOutOfMemory,
-    OldOutOfMemory,
+        work
+    }
+
+    fn free_object(&mut self, obj: GCPtr, prev: Option<GCPtr>) -> usize {
+        match prev {
+            Some(mut prev) => prev.hdr_mut().next = obj.hdr().next,
+            None => self.objects = obj.hdr().next,
+        }
+
+        let layout = obj.hdr().layout;
+        let size = layout.size();
+
+        unsafe {
+            // Safety: The object is cast to the correct type before dropping
+            match obj.ty() {
+                ObjType::Array | ObjType::PtrArray => obj.as_ptr::<ObjArray>().drop_in_place(),
+                ObjType::List | ObjType::PtrList => obj.as_ptr::<ObjList>().drop_in_place(),
+                ObjType::Struct | ObjType::PtrStruct => obj.as_ptr::<ObjStruct>().drop_in_place(),
+                ObjType::String => obj.as_ptr::<ObjString>().drop_in_place(),
+                ObjType::Task => obj.as_ptr::<ObjTask>().drop_in_place(),
+            }
+
+            // Safety:
+            // This pointer came from this allocator.
+            // The layout of this memory is cached in the header.
+            self.allocator.free(obj.as_ptr::<u8>(), layout);
+        }
+
+        self.bytes_allocated = self.bytes_allocated.saturating_sub(size);
+        size
+    }
+
+    fn step_gc(&mut self, roots: &[Value], limit: usize) -> usize {
+        let mut cost = 0;
+
+        match self.gc_state {
+            GCState::Pause => self.mark_roots(roots),
+            GCState::Propagate => {
+                while let Some(obj) = self.gray
+                    && cost < limit
+                {
+                    cost += self.propagate_mark(obj)
+                }
+
+                if self.gray.is_none() {
+                    std::mem::swap(&mut self.gray, &mut self.gray_again);
+                    self.gc_state = GCState::PropagateAgain;
+                }
+            }
+            GCState::PropagateAgain => {
+                while let Some(obj) = self.gray
+                    && cost < limit
+                {
+                    cost += self.propagate_mark(obj)
+                }
+
+                if self.gray.is_none() {
+                    self.gc_state = GCState::Atomic;
+                }
+            }
+            GCState::Atomic => cost = self.atomic(roots),
+            GCState::Sweep => cost = self.sweep(limit),
+        }
+
+        cost
+    }
+
+    /// Forward barrier - marks the child object to maintain invariant
+    /// Used when: black object gets a new white child reference
+    pub fn barrier_forward(&mut self, parent: GCPtr, child: GCPtr) {
+        if self.gc_state.keep_invariant()
+            && parent.hdr().color.is_black()
+            && child.hdr().color.is_white()
+        {
+            self.mark_object(child);
+        }
+    }
+
+    /// Backward barrier - marks parent gray again
+    /// Used for: table/array/struct writes during Propagate phase
+    pub fn barrier_back(&mut self, mut parent: GCPtr) {
+        if self.gc_state == GCState::Pause || !parent.hdr().color.is_black() {
+            return;
+        }
+
+        parent.hdr_mut().color = GCColor::Gray;
+
+        match parent.ty() {
+            ObjType::PtrArray => {
+                parent.as_mut::<ObjArray>().gc_list = self.gray_again;
+                self.gray_again = Some(parent);
+            }
+            ObjType::PtrList => {
+                parent.as_mut::<ObjList>().gc_list = self.gray_again;
+                self.gray_again = Some(parent);
+            }
+            ObjType::PtrStruct => {
+                parent.as_mut::<ObjStruct>().gc_list = self.gray_again;
+                self.gray_again = Some(parent);
+            }
+            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {}
+            ObjType::Task => todo!("task barrier_back"),
+        }
+    }
+
+    /// Table barrier - special handling for PropagateAgain phase
+    /// During PropagateAgain, use forward barrier; otherwise backward
+    pub fn barrier_table(&mut self, parent: GCPtr, child: GCPtr) {
+        if self.gc_state == GCState::Pause {
+            return;
+        }
+
+        if self.gc_state == GCState::PropagateAgain {
+            self.barrier_forward(parent, child);
+        } else {
+            self.barrier_back(parent);
+        }
+    }
+
+    /// Public GC step function - performs incremental GC work
+    /// Returns the amount of work done
+    pub fn gc_step(&mut self, roots: &[Value], limit: usize) -> usize {
+        // Check if we should start a new cycle
+        if self.gc_state == GCState::Pause && self.bytes_allocated > self.gc_threshold {
+            self.step_gc(roots, limit);
+        }
+
+        // Perform one GC step
+        let work = self.step_gc(roots, limit);
+
+        // Update threshold when cycle completes
+        if self.gc_state == GCState::Pause {
+            self.gc_threshold = (self.bytes_allocated * 2).max(MAX_THRESHOLD);
+        }
+
+        work
+    }
 }

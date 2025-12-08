@@ -1,5 +1,5 @@
-use crate::token;
-use crate::token::{Span, Token, TokenType};
+use super::tokens::{Span, Token, TokenType};
+use crate::tt;
 
 // Error Types
 #[derive(Debug)]
@@ -75,33 +75,33 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace();
 
         let Some((o, ch)) = self.current else {
-            return Ok(self.make_token(token![eof], self.byte_pos, "<eof>"));
+            return Ok(self.make_token(tt![eof], self.byte_pos, "<eof>"));
         };
 
         match ch {
             // Single symbols
-            '(' => Ok(self.make_single(token!['('], o)),
-            ')' => Ok(self.make_single(token![')'], o)),
-            '{' => Ok(self.make_single(token!['{'], o)),
-            '}' => Ok(self.make_single(token!['}'], o)),
-            '[' => Ok(self.make_single(token!['['], o)),
-            ']' => Ok(self.make_single(token![']'], o)),
-            ',' => Ok(self.make_single(token![,], o)),
-            '.' => Ok(self.make_single(token![.], o)),
-            ';' => Ok(self.make_single(token![;], o)),
-            '?' => Ok(self.make_single(token![?], o)),
+            '(' => Ok(self.make_single(tt!['('], o)),
+            ')' => Ok(self.make_single(tt![')'], o)),
+            '{' => Ok(self.make_single(tt!['{'], o)),
+            '}' => Ok(self.make_single(tt!['}'], o)),
+            '[' => Ok(self.make_single(tt!['['], o)),
+            ']' => Ok(self.make_single(tt![']'], o)),
+            ',' => Ok(self.make_single(tt![,], o)),
+            '.' => Ok(self.make_single(tt![.], o)),
+            ';' => Ok(self.make_single(tt![;], o)),
+            '?' => Ok(self.make_single(tt![?], o)),
 
             // Double symbols
             '=' => Ok(self.make_equals(o)),
             '-' => Ok(self.make_minus(o)),
-            ':' => Ok(self.make_double(':', token![:], token![::], o)),
-            '!' => Ok(self.make_double('=', token![!], token![!=], o)),
-            '>' => Ok(self.make_double('=', token![>], token![>=], o)),
-            '<' => Ok(self.make_double('=', token![<], token![<=], o)),
-            '%' => Ok(self.make_double('=', token![%], token![%=], o)),
-            '+' => Ok(self.make_double('=', token![+], token![+=], o)),
-            '*' => Ok(self.make_double('=', token![*], token![*=], o)),
-            '/' => Ok(self.make_double('=', token![/], token![/=], o)),
+            ':' => Ok(self.make_double(':', tt![:], tt![::], o)),
+            '!' => Ok(self.make_double('=', tt![!], tt![!=], o)),
+            '>' => Ok(self.make_double('=', tt![>], tt![>=], o)),
+            '<' => Ok(self.make_double('=', tt![<], tt![<=], o)),
+            '%' => Ok(self.make_double('=', tt![%], tt![%=], o)),
+            '+' => Ok(self.make_double('=', tt![+], tt![+=], o)),
+            '*' => Ok(self.make_double('=', tt![*], tt![*=], o)),
+            '/' => Ok(self.make_double('=', tt![/], tt![/=], o)),
 
             // String literals
             '"' => self.make_string(o),
@@ -195,25 +195,13 @@ impl<'a> Lexer<'a> {
         match self.current {
             Some((_, '=')) => {
                 self.advance();
-                self.make_token(
-                    token![==],
-                    start_byte,
-                    &self.input[start_byte..self.byte_pos],
-                )
+                self.make_token(tt![==], start_byte, &self.input[start_byte..self.byte_pos])
             }
             Some((_, '>')) => {
                 self.advance();
-                self.make_token(
-                    token![=>],
-                    start_byte,
-                    &self.input[start_byte..self.byte_pos],
-                )
+                self.make_token(tt![=>], start_byte, &self.input[start_byte..self.byte_pos])
             }
-            _ => self.make_token(
-                token![=],
-                start_byte,
-                &self.input[start_byte..start_byte + 1],
-            ),
+            _ => self.make_token(tt![=], start_byte, &self.input[start_byte..start_byte + 1]),
         }
     }
 
@@ -223,25 +211,13 @@ impl<'a> Lexer<'a> {
         match self.current {
             Some((_, '=')) => {
                 self.advance();
-                self.make_token(
-                    token![-=],
-                    start_byte,
-                    &self.input[start_byte..self.byte_pos],
-                )
+                self.make_token(tt![-=], start_byte, &self.input[start_byte..self.byte_pos])
             }
             Some((_, '>')) => {
                 self.advance();
-                self.make_token(
-                    token![->],
-                    start_byte,
-                    &self.input[start_byte..self.byte_pos],
-                )
+                self.make_token(tt![->], start_byte, &self.input[start_byte..self.byte_pos])
             }
-            _ => self.make_token(
-                token![-],
-                start_byte,
-                &self.input[start_byte..start_byte + 1],
-            ),
+            _ => self.make_token(tt![-], start_byte, &self.input[start_byte..start_byte + 1]),
         }
     }
 
@@ -345,44 +321,36 @@ impl<'a> Lexer<'a> {
         let lexeme = &self.input[start_byte..end_byte];
 
         let ty = match lexeme {
-            "and" => token![and],
-            "any" => token![any],
-            "bool" => token![bool],
-            "break" => token![break],
-            "continue" => token![continue],
-            "else" => token![else],
-            "false" => token![false],
-            "float" => token![float],
-            "fn" => token![fn],
-            "for" => token![for],
-            "if" => token![if],
-            "int" => token![int],
-            "let" => token![let],
-            "match" => token![match],
-            "null" => token![null],
-            "or" => token![or],
-            "return" => token![return],
-            "str" => token![str],
-            "struct" => token![struct],
-            "self" => token![self],
-            "true" => token![true],
-            "while" => token![while],
-            "void" => token![void],
+            "and" => tt![and],
+            "any" => tt![any],
+            "bool" => tt![bool],
+            "break" => tt![break],
+            "continue" => tt![continue],
+            "else" => tt![else],
+            "false" => tt![false],
+            "float" => tt![float],
+            "fn" => tt![fn],
+            "for" => tt![for],
+            "if" => tt![if],
+            "int" => tt![int],
+            "loop" => tt![loop],
+            "match" => tt![match],
+            "mod" => tt![mod],
+            "null" => tt![null],
+            "or" => tt![or],
+            "pub" => tt![pub],
+            "return" => tt![return],
+            "str" => tt![str],
+            "struct" => tt![struct],
+            "self" => tt![self],
+            "true" => tt![true],
+            "val" => tt![val],
+            "var" => tt![var],
+            "while" => tt![while],
+            "void" => tt![void],
             _ => TokenType::Ident,
         };
 
         self.make_token(ty, start_byte, lexeme)
-    }
-}
-
-#[test]
-fn test() {
-    let input = r#" let name = "Hello World!";"#;
-    let mut lexer = Lexer::new(input);
-
-    while let Ok(token) = lexer.next_token()
-        && token.ty != token![eof]
-    {
-        println!("{:?}", token);
     }
 }

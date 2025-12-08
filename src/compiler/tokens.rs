@@ -56,15 +56,19 @@ pub(crate) enum TokenType {
     For,
     If,
     Int,
-    Let,
+    Loop,
     Match,
+    Mod,
     Null,
     Or,
+    Pub,
     Return,
     Struct,
     Str,
     This,
     True,
+    Val,
+    Var,
     While,
     Void,
 
@@ -72,204 +76,216 @@ pub(crate) enum TokenType {
     Eof,
 }
 
-#[macro_export]
-macro_rules! token {
-    (ident) => {
-        $crate::token::TokenType::Ident
-    };
-
-    (int_lit) => {
-        $crate::token::TokenType::IntLit
-    };
-
-    (float_lit) => {
-        $crate::token::TokenType::FloatLit
-    };
-
-    (str_lit) => {
-        $crate::token::TokenType::StringLit
-    };
-
-    (')') => {
-        $crate::token::TokenType::RightParen
-    };
-    ('(') => {
-        $crate::token::TokenType::LeftParen
-    };
-    ('}') => {
-        $crate::token::TokenType::RightBrace
-    };
-    ('{') => {
-        $crate::token::TokenType::LeftBrace
-    };
-    (']') => {
-        $crate::token::TokenType::RightBracket
-    };
-    ('[') => {
-        $crate::token::TokenType::LeftBracket
-    };
-    (,) => {
-        $crate::token::TokenType::Comma
-    };
-    (.) => {
-        $crate::token::TokenType::Dot
-    };
-    (;) => {
-        $crate::token::TokenType::Semicolon
-    };
-    (?) => {
-        $crate::token::TokenType::Question
-    };
-
-    // Single/double symbols
-    (->) => {
-        $crate::token::TokenType::Arrow
-    };
-    (!) => {
-        $crate::token::TokenType::Bang
-    };
-    (!=) => {
-        $crate::token::TokenType::BangEqual
-    };
-    (:) => {
-        $crate::token::TokenType::Colon
-    };
-    (::) => {
-        $crate::token::TokenType::ColonColon
-    };
-    (=) => {
-        $crate::token::TokenType::Equal
-    };
-    (==) => {
-        $crate::token::TokenType::EqualEqual
-    };
-    (>) => {
-        $crate::token::TokenType::Greater
-    };
-    (>=) => {
-        $crate::token::TokenType::GreaterEqual
-    };
-    (=>) => {
-        $crate::token::TokenType::FatArrow
-    };
-    (<) => {
-        $crate::token::TokenType::Less
-    };
-    (<=) => {
-        $crate::token::TokenType::LessEqual
-    };
-    (-) => {
-        $crate::token::TokenType::Minus
-    };
-    (-=) => {
-        $crate::token::TokenType::MinusEqual
-    };
-    (%) => {
-        $crate::token::TokenType::Percent
-    };
-    (%=) => {
-        $crate::token::TokenType::PercentEqual
-    };
-    (+) => {
-        $crate::token::TokenType::Plus
-    };
-    (+=) => {
-        $crate::token::TokenType::PlusEqual
-    };
-    (*) => {
-        $crate::token::TokenType::Star
-    };
-    (*=) => {
-        $crate::token::TokenType::StarEqual
-    };
-    (/) => {
-        $crate::token::TokenType::Slash
-    };
-    (/=) => {
-        $crate::token::TokenType::SlashEqual
-    };
-
-    // Keywords
-    (and) => {
-        $crate::token::TokenType::And
-    };
-    (any) => {
-        $crate::token::TokenType::Any
-    };
-    (bool) => {
-        $crate::token::TokenType::Bool
-    };
-    (break) => {
-        $crate::token::TokenType::Break
-    };
-    (continue) => {
-        $crate::token::TokenType::Continue
-    };
-    (else) => {
-        $crate::token::TokenType::Else
-    };
-    (false) => {
-        $crate::token::TokenType::False
-    };
-    (float) => {
-        $crate::token::TokenType::Float
-    };
-    (fn) => {
-        $crate::token::TokenType::Fn
-    };
-    (for) => {
-        $crate::token::TokenType::For
-    };
-    (if) => {
-        $crate::token::TokenType::If
-    };
-    (int) => {
-        $crate::token::TokenType::Int
-    };
-    (let) => {
-        $crate::token::TokenType::Let
-    };
-    (match) => {
-        $crate::token::TokenType::Match
-    };
-    (null) => {
-        $crate::token::TokenType::Null
-    };
-    (or) => {
-        $crate::token::TokenType::Or
-    };
-    (return) => {
-        $crate::token::TokenType::Return
-    };
-    (str) => {
-        $crate::token::TokenType::Str
-    };
-    (struct) => {
-        $crate::token::TokenType::Struct
-    };
-    (self) => {
-        $crate::token::TokenType::This
-    };
-    (true) => {
-        $crate::token::TokenType::True
-    };
-    (while) => {
-        $crate::token::TokenType::While
-    };
-    (void) => {
-        $crate::token::TokenType::Void
-    };
-    (eof) => {
-        $crate::token::TokenType::Eof
-    };
-}
-
 impl TokenType {
     pub const COUNT: usize = TokenType::Eof as usize + 1;
 }
 
+#[macro_export]
+macro_rules! tt {
+    (ident) => {
+        $crate::compiler::tokens::TokenType::Ident
+    };
+
+    (int_lit) => {
+        $crate::compiler::tokens::TokenType::IntLit
+    };
+
+    (float_lit) => {
+        $crate::compiler::tokens::TokenType::FloatLit
+    };
+
+    (str_lit) => {
+        $crate::compiler::tokens::TokenType::StringLit
+    };
+
+    (')') => {
+        $crate::compiler::tokens::TokenType::RightParen
+    };
+    ('(') => {
+        $crate::compiler::tokens::TokenType::LeftParen
+    };
+    ('}') => {
+        $crate::compiler::tokens::TokenType::RightBrace
+    };
+    ('{') => {
+        $crate::compiler::tokens::TokenType::LeftBrace
+    };
+    (']') => {
+        $crate::compiler::tokens::TokenType::RightBracket
+    };
+    ('[') => {
+        $crate::compiler::tokens::TokenType::LeftBracket
+    };
+    (,) => {
+        $crate::compiler::tokens::TokenType::Comma
+    };
+    (.) => {
+        $crate::compiler::tokens::TokenType::Dot
+    };
+    (;) => {
+        $crate::compiler::tokens::TokenType::Semicolon
+    };
+    (?) => {
+        $crate::compiler::tokens::TokenType::Question
+    };
+
+    // Single/double symbols
+    (->) => {
+        $crate::compiler::tokens::TokenType::Arrow
+    };
+    (!) => {
+        $crate::compiler::tokens::TokenType::Bang
+    };
+    (!=) => {
+        $crate::compiler::tokens::TokenType::BangEqual
+    };
+    (:) => {
+        $crate::compiler::tokens::TokenType::Colon
+    };
+    (::) => {
+        $crate::compiler::tokens::TokenType::ColonColon
+    };
+    (=) => {
+        $crate::compiler::tokens::TokenType::Equal
+    };
+    (==) => {
+        $crate::compiler::tokens::TokenType::EqualEqual
+    };
+    (>) => {
+        $crate::compiler::tokens::TokenType::Greater
+    };
+    (>=) => {
+        $crate::compiler::tokens::TokenType::GreaterEqual
+    };
+    (=>) => {
+        $crate::compiler::tokens::TokenType::FatArrow
+    };
+    (<) => {
+        $crate::compiler::tokens::TokenType::Less
+    };
+    (<=) => {
+        $crate::compiler::tokens::TokenType::LessEqual
+    };
+    (-) => {
+        $crate::compiler::tokens::TokenType::Minus
+    };
+    (-=) => {
+        $crate::compiler::tokens::TokenType::MinusEqual
+    };
+    (%) => {
+        $crate::compiler::tokens::TokenType::Percent
+    };
+    (%=) => {
+        $crate::compiler::tokens::TokenType::PercentEqual
+    };
+    (+) => {
+        $crate::compiler::tokens::TokenType::Plus
+    };
+    (+=) => {
+        $crate::compiler::tokens::TokenType::PlusEqual
+    };
+    (*) => {
+        $crate::compiler::tokens::TokenType::Star
+    };
+    (*=) => {
+        $crate::compiler::tokens::TokenType::StarEqual
+    };
+    (/) => {
+        $crate::compiler::tokens::TokenType::Slash
+    };
+    (/=) => {
+        $crate::compiler::tokens::TokenType::SlashEqual
+    };
+
+    // Keywords
+    (and) => {
+        $crate::compiler::tokens::TokenType::And
+    };
+    (any) => {
+        $crate::compiler::tokens::TokenType::Any
+    };
+    (bool) => {
+        $crate::compiler::tokens::TokenType::Bool
+    };
+    (break) => {
+        $crate::compiler::tokens::TokenType::Break
+    };
+    (continue) => {
+        $crate::compiler::tokens::TokenType::Continue
+    };
+    (else) => {
+        $crate::compiler::tokens::TokenType::Else
+    };
+    (false) => {
+        $crate::compiler::tokens::TokenType::False
+    };
+    (float) => {
+        $crate::compiler::tokens::TokenType::Float
+    };
+    (fn) => {
+        $crate::compiler::tokens::TokenType::Fn
+    };
+    (for) => {
+        $crate::compiler::tokens::TokenType::For
+    };
+    (if) => {
+        $crate::compiler::tokens::TokenType::If
+    };
+    (int) => {
+        $crate::compiler::tokens::TokenType::Int
+    };
+    (loop) => {
+        $crate::compiler::tokens::TokenType::Loop
+    };
+    (match) => {
+        $crate::compiler::tokens::TokenType::Match
+    };
+    (mod) => {
+        $crate::compiler::tokens::TokenType::Mod
+    };
+    (null) => {
+        $crate::compiler::tokens::TokenType::Null
+    };
+    (or) => {
+        $crate::compiler::tokens::TokenType::Or
+    };
+    (pub) => {
+        $crate::compiler::tokens::TokenType::Pub
+    };
+    (return) => {
+        $crate::compiler::tokens::TokenType::Return
+    };
+    (str) => {
+        $crate::compiler::tokens::TokenType::Str
+    };
+    (struct) => {
+        $crate::compiler::tokens::TokenType::Struct
+    };
+    (self) => {
+        $crate::compiler::tokens::TokenType::This
+    };
+    (true) => {
+        $crate::compiler::tokens::TokenType::True
+    };
+    (val) => {
+        $crate::compiler::tokens::TokenType::Val
+    };
+    (var) => {
+        $crate::compiler::tokens::TokenType::Var
+    };
+    (while) => {
+        $crate::compiler::tokens::TokenType::While
+    };
+    (void) => {
+        $crate::compiler::tokens::TokenType::Void
+    };
+    (eof) => {
+        $crate::compiler::tokens::TokenType::Eof
+    };
+}
+
 /// Represents a region of source code
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     /// Byte offset of first character (0-based)
     pub start: usize,
