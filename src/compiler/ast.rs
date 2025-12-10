@@ -176,7 +176,7 @@ pub enum StmtKind {
         mutable: bool,
         name: Ident,
         ty: Option<TypeId>,
-        val: Option<ExprId>,
+        val: ExprId,
     },
     Expr {
         expr: ExprId,
@@ -217,6 +217,18 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name: Ident,
+    pub default: Option<TypeId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Generics {
+    pub params: Vec<GenericParam>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Field {
     pub name: Ident,
     pub ty: TypeId,
@@ -230,7 +242,6 @@ pub struct Path {
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
-    Unknown,
     Any,
     Int,
     Float,
@@ -242,7 +253,7 @@ pub enum TypeKind {
     Array { ty: TypeId, len: ExprId },
     DynArray(TypeId),
     Function { params: Vec<TypeId>, ret: TypeId },
-    Path(PathId),
+    Path(Ident),
 }
 
 #[derive(Debug, Clone)]
@@ -254,17 +265,14 @@ pub struct Type {
 #[derive(Debug, Clone)]
 pub enum ItemKind {
     Module {
-        name: Ident,
         items: Vec<ItemId>,
     },
     Function {
-        name: Ident,
         params: Vec<Param>,
         ret: TypeId,
         body: ExprId,
     },
     Struct {
-        name: Ident,
         fields: Vec<Field>,
     },
 }
@@ -272,6 +280,7 @@ pub enum ItemKind {
 #[derive(Debug, Clone)]
 pub struct Item {
     pub is_pub: bool, // TODO: expand to parent, etc.
+    pub name: Ident,
     pub kind: ItemKind,
     pub span: Span,
 }
@@ -279,7 +288,6 @@ pub struct Item {
 impl Type {
     pub fn name(&self, interner: &Interner, ast: &Arena<TypeId, Type>) -> String {
         match &self.kind {
-            TypeKind::Unknown => "unknown".to_string(),
             TypeKind::Any => "any".to_string(),
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),

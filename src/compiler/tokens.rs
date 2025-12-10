@@ -97,24 +97,23 @@ macro_rules! tt {
     (str_lit) => {
         $crate::compiler::tokens::TokenType::StringLit
     };
-
-    (')') => {
-        $crate::compiler::tokens::TokenType::RightParen
-    };
     ('(') => {
         $crate::compiler::tokens::TokenType::LeftParen
     };
-    ('}') => {
-        $crate::compiler::tokens::TokenType::RightBrace
+    (')') => {
+        $crate::compiler::tokens::TokenType::RightParen
     };
     ('{') => {
         $crate::compiler::tokens::TokenType::LeftBrace
     };
-    (']') => {
-        $crate::compiler::tokens::TokenType::RightBracket
+    ('}') => {
+        $crate::compiler::tokens::TokenType::RightBrace
     };
     ('[') => {
         $crate::compiler::tokens::TokenType::LeftBracket
+    };
+    (']') => {
+        $crate::compiler::tokens::TokenType::RightBracket
     };
     (,) => {
         $crate::compiler::tokens::TokenType::Comma

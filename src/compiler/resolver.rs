@@ -1,504 +1,506 @@
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 
 use crate::{
     arena::Interner,
     compiler::{
         ast::{
-            AstArena, Expr, ExprKind, Ident, Item, ItemId, ItemKind, Pattern, PatternKind, Stmt,
-            StmtKind, Type, Type, TypeId,
+            AstArena, ExprId, ExprKind, Ident, ItemId, ItemKind, StmtId, StmtKind, TypeId, TypeKind,
         },
         tokens::Span,
     },
 };
 
+/// Identifies what kind of symbol this is
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    Module { item_id: ItemId },
+    Function { item_id: ItemId },
+    Variable { mutable: bool, ty: Option<TypeId> },
+    Type,
+}
+
+/// Information about a symbol in a scope
+#[derive(Debug, Clone)]
+pub struct Symbol {
+    /// The identifier name
+    pub name: Ident,
+    /// What kind of symbol this is
+    pub kind: SymbolKind,
+    /// Where this symbol was defined
+    pub def_span: Span,
+}
+
+/// A unique identifier for scopes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScopeId(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    /// Top-level/package scope
+    Global,
+    /// Module scope
+    Module,
+    /// Function body
+    Function,
+    /// Block expression
+    Block,
+    /// Loop body (for break/continue context)
+    Loop,
+}
+
+/// Represents a lexical scope
 #[derive(Debug)]
-pub enum ResolveErrorKind {
+pub struct Scope {
+    /// Unique identifier for this scope
+    pub id: ScopeId,
+    /// Parent scope (None for global scope)
+    pub parent: Option<ScopeId>,
+    /// Symbols defined directly in this scope
+    symbols: AHashMap<Ident, Symbol>,
+    /// Kind of scope (for context)
+    pub kind: ScopeKind,
+}
+
+impl Scope {
+    pub fn new(id: ScopeId, parent: Option<ScopeId>, kind: ScopeKind) -> Self {
+        Self {
+            id,
+            parent,
+            symbols: AHashMap::new(),
+            kind,
+        }
+    }
+
+    /// Insert a symbol into this scope
+    /// Returns the old symbol if one existed (for shadowing detection)
+    pub fn insert(&mut self, symbol: Symbol) -> Result<(), (Symbol, Span)> {
+        use std::collections::hash_map::Entry;
+
+        match self.symbols.entry(symbol.name) {
+            Entry::Occupied(entry) => Err((symbol, entry.get().def_span)),
+            Entry::Vacant(entry) => {
+                entry.insert(symbol);
+                Ok(())
+            }
+        }
+    }
+
+    /// Look up a symbol in this scope only (does not check parent scopes)
+    pub fn get(&self, name: Ident) -> Option<&Symbol> {
+        self.symbols.get(&name)
+    }
+
+    /// Get a mutable reference to a symbol in this scope
+    pub fn get_mut(&mut self, name: Ident) -> Option<&mut Symbol> {
+        self.symbols.get_mut(&name)
+    }
+
+    /// Iterate over all symbols in this scope
+    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &Symbol)> {
+        self.symbols.iter()
+    }
+}
+
+/// Manages all scopes and symbol resolution
+pub struct SymbolTable {
+    /// All scopes indexed by ScopeId
+    scopes: Vec<Scope>,
+    item_scopes: AHashMap<ItemId, ScopeId>,
+    expr_scopes: AHashMap<ExprId, ScopeId>,
+}
+
+impl SymbolTable {
+    /// Create a new symbol table with a global scope
+    pub fn new() -> Self {
+        Self {
+            scopes: vec![],
+            item_scopes: AHashMap::new(),
+            expr_scopes: AHashMap::new(),
+        }
+    }
+
+    pub fn new_item_scope(&mut self, kind: ScopeKind, item_id: ItemId, parent: ScopeId) -> ScopeId {
+        let id = ScopeId(self.scopes.len());
+        self.scopes.push(Scope::new(id, Some(parent), kind));
+        self.item_scopes.insert(item_id, id);
+        id
+    }
+
+    pub fn new_expr_scope(&mut self, kind: ScopeKind, expr_id: ExprId, parent: ScopeId) -> ScopeId {
+        let id = ScopeId(self.scopes.len());
+        self.scopes.push(Scope::new(id, Some(parent), kind));
+        self.expr_scopes.insert(expr_id, id);
+        id
+    }
+
+    pub fn get_scope(&self, scope_id: ScopeId) -> &Scope {
+        &self.scopes[scope_id.0]
+    }
+
+    pub fn get_scope_mut(&mut self, scope_id: ScopeId) -> &mut Scope {
+        &mut self.scopes[scope_id.0]
+    }
+
+    /// Look up a symbol by name, searching current scope and all parent scopes
+    /// Returns the symbol and the scope it was found in
+    pub fn lookup(&self, name: Ident, mut scope_id: ScopeId) -> Option<(&Symbol, ScopeId)> {
+        loop {
+            let scope = &self.scopes[scope_id.0];
+
+            if let Some(symbol) = scope.get(name) {
+                return Some((symbol, scope_id));
+            }
+
+            scope_id = scope.parent?;
+        }
+    }
+
+    /// Look up a symbol in the local scope only
+    pub fn lookup_local(&self, name: Ident, scope_id: ScopeId) -> Option<&Symbol> {
+        self.scopes[scope_id.0].get(name)
+    }
+
+    /// Get mutable reference to a symbol by looking up the scope chain
+    pub fn lookup_mut(
+        &mut self,
+        name: Ident,
+        mut scope_id: ScopeId,
+    ) -> Option<(&mut Symbol, ScopeId)> {
+        let target_scope = loop {
+            let scope = &self.scopes[scope_id.0];
+
+            if scope.get(name).is_some() {
+                break scope_id;
+            }
+
+            scope_id = scope.parent?;
+        };
+
+        Some((
+            self.scopes[target_scope.0].get_mut(name).unwrap(),
+            target_scope,
+        ))
+    }
+
+    /// Find the nearest enclosing loop scope (for break/continue validation)
+    pub fn find_loop_scope(&self, mut scope_id: ScopeId) -> Option<ScopeId> {
+        loop {
+            let scope = &self.scopes[scope_id.0];
+
+            if scope.kind == ScopeKind::Loop {
+                return Some(scope_id);
+            }
+
+            match scope.parent {
+                Some(parent) => scope_id = parent,
+                None => return None,
+            }
+        }
+    }
+
+    /// Find the nearest enclosing function scope
+    pub fn find_function_scope(&self, mut scope_id: ScopeId) -> Option<ScopeId> {
+        loop {
+            let scope = &self.scopes[scope_id.0];
+
+            if scope.kind == ScopeKind::Function {
+                return Some(scope_id);
+            }
+
+            match scope.parent {
+                Some(parent) => scope_id = parent,
+                None => return None,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ResolveError {
+    /// Symbol is defined multiple times in the same scope
     DuplicateSymbol {
         name: Ident,
-        first_defined: Span,
+        first_def: Span,
+        dupe_def: Span,
     },
     DuplicateField {
         struct_name: Ident,
         field_name: Ident,
+        first_def: Span,
+        dupe_def: Span,
     },
-    UndefinedVariable(Ident),
-    UndefinedType(Ident),
-    CannotAssignToImmutable(Ident),
-    InvalidAssignmentTarget,
-    ResolverFailed,
-}
+    /// Symbol is not found in any scope
+    UndefinedSymbol {
+        name: Ident,
+        use_span: Span,
+    },
 
-pub struct ResolveError {
-    pub kind: ResolveErrorKind,
-    pub span: Span,
-}
+    /// Variable used before initialization
+    UninitVariable {
+        name: Ident,
+        use_span: Span,
+        def_span: Span,
+    },
 
-impl ResolveError {
-    pub fn display(&self, interner: &Interner) -> String {
-        match self.kind {
-            ResolveErrorKind::DuplicateSymbol {
-                name,
-                first_defined,
-            } => {
-                let name_str = interner.resolve(name).unwrap_or("?");
-                format!(
-                    "Symbol '{}' is already defined at {:?}",
-                    name_str, first_defined
-                )
-            }
-            ResolveErrorKind::DuplicateField {
-                struct_name,
-                field_name,
-                ..
-            } => {
-                let struct_str = interner.resolve(struct_name).unwrap_or("?");
-                let field_str = interner.resolve(field_name).unwrap_or("?");
-                format!("Duplicate field '{}' in struct '{}'", field_str, struct_str)
-            }
-            ResolveErrorKind::UndefinedVariable(name) => {
-                let name_str = interner.resolve(name).unwrap_or("?");
-                format!("Undefined variable '{}'", name_str)
-            }
-            ResolveErrorKind::UndefinedType(name) => {
-                let name_str = interner.resolve(name).unwrap_or("?");
-                format!("Undefined type '{}'", name_str)
-            }
-            ResolveErrorKind::CannotAssignToImmutable(name) => {
-                let name_str = interner.resolve(name).unwrap_or("?");
-                format!("Cannot assign to immutable variable '{}'", name_str)
-            }
-            ResolveErrorKind::InvalidAssignmentTarget => "Invalid assignment target".to_string(),
-            ResolveErrorKind::ResolverFailed => {
-                "Resolver did not return to global scope".to_string()
-            }
-        }
-    }
-}
-#[derive(Debug)]
-pub enum SymbolKind {
-    Variable {
-        ty: TypeId,
-        mutable: bool,
+    /// break used outside of a loop
+    BreakOutsideLoop {
+        span: Span,
     },
-    Function {
-        scope_id: ScopeId,
-        params: Vec<TypeId>,
-        ret: TypeId,
+
+    /// continue used outside of a loop
+    ContinueOutsideLoop {
+        span: Span,
     },
-    Type {
-        ty: TypeId,
+
+    /// return used outside of a function
+    ReturnOutsideFunction {
+        span: Span,
     },
-    Module {
-        scope_id: ScopeId,
+
+    InvalidSymbolInExpression {
+        name: Ident,
+        span: Span,
+        kind: SymbolKind,
     },
-    Struct {
-        fields: Vec<StructField>,
+
+    TypeNotFound {
+        name: Ident,
+        use_span: Span,
+    },
+    Internal {
+        msg: String,
+        span: Span,
     },
 }
 
-#[derive(Debug)]
-pub struct StructField {
-    pub name: Ident,
-    pub ty: TypeId,
-}
-
-#[derive(Debug)]
-pub struct Symbol {
-    pub name: Ident,
-    pub kind: SymbolKind,
-    pub span: Span,
-}
-
-#[derive(Debug)]
-pub struct Scope {
-    pub symbols: AHashMap<Ident, Symbol>,
-    pub parent: Option<ScopeId>,
-}
-
-pub type ScopeId = usize;
-
-#[derive(Debug)]
-pub struct SymbolTable {
-    pub scopes: Vec<Scope>,
-    pub current: ScopeId,
-}
-
-impl SymbolTable {
-    pub fn new() -> Self {
-        let global = Scope {
-            symbols: AHashMap::new(),
-            parent: None,
-        };
-
-        Self {
-            scopes: vec![global],
-            current: 0,
-        }
-    }
-
-    /// Enter a new scope
-    pub fn enter_scope(&mut self) -> ScopeId {
-        self.scopes.push(Scope {
-            symbols: AHashMap::new(),
-            parent: Some(self.current),
-        });
-        self.current = self.scopes.len() - 1;
-        self.current
-    }
-
-    // Exit current scope
-    pub fn exit_scope(&mut self) {
-        if let Some(parent) = self.scopes[self.current].parent {
-            self.current = parent;
-        } else {
-            todo!("Cannot exit global scope")
-        }
-    }
-
-    pub fn current_scope(&self) -> ScopeId {
-        self.current
-    }
-
-    pub fn set_current_scope(&mut self, scope_id: ScopeId) {
-        assert!(scope_id < self.scopes.len(), "Invalid scope ID");
-        self.current = scope_id;
-    }
-
-    /// Define a symbol in current scope
-    pub fn define(&mut self, symbol: Symbol) -> Result<(), ResolveError> {
-        let name = symbol.name.clone();
-
-        if let Some(existing) = self.scopes[self.current].symbols.get(&name) {
-            return Err(ResolveError {
-                kind: ResolveErrorKind::DuplicateSymbol {
-                    name,
-                    first_defined: existing.span,
-                },
-                span: symbol.span,
-            });
-        }
-
-        self.scopes[self.current].symbols.insert(name, symbol);
-        Ok(())
-    }
-
-    /// Lookup a symbol, searching parent scopes
-    pub fn lookup(&self, name: &Ident) -> Option<&Symbol> {
-        let mut scope_id = self.current;
-
-        loop {
-            let scope = &self.scopes[scope_id];
-
-            if let Some(symbol) = scope.symbols.get(name) {
-                return Some(symbol);
-            }
-
-            scope_id = scope.parent?;
-        }
-    }
-
-    /// Lookup in current scope only (E.g. checking duplicates)
-    pub fn lookup_current(&self, name: &Ident) -> Option<&Symbol> {
-        self.scopes[self.current].symbols.get(&name)
-    }
-
-    /// Lookup a symbol in a specific scope
-    fn lookup_in_scope(&self, scope_id: ScopeId, name: &Ident) -> Option<&Symbol> {
-        self.scopes.get(scope_id)?.symbols.get(&name)
-    }
-
-    /// Lookup a symbol starting from a specific scope (with parent traversal)
-    fn lookup_from_scope(&self, mut scope_id: ScopeId, name: &Ident) -> Option<&Symbol> {
-        loop {
-            let scope = self.scopes.get(scope_id)?;
-
-            if let Some(symbol) = scope.symbols.get(&name) {
-                return Some(symbol);
-            }
-
-            scope_id = scope.parent?;
-        }
-    }
-
-    pub fn set_var_type(&mut self, name: Ident, new_ty: TypeId) -> Result<(), ResolveError> {
-        let mut scope_id = self.current;
-
-        while scope_id < self.scopes.len() {
-            let scope = &mut self.scopes[scope_id];
-
-            if let Some(symbol) = scope.symbols.get_mut(&name) {
-                if let SymbolKind::Variable { ty, .. } = &mut symbol.kind {
-                    return Ok(*ty = new_ty);
-                } else {
-                    break;
-                }
-            }
-
-            scope_id = match scope.parent {
-                Some(id) => id,
-                None => break,
-            }
-        }
-
-        return Err(ResolveError {
-            kind: ResolveErrorKind::UndefinedVariable(name),
-            span: Span::default(),
-        });
-    }
-}
-
-pub struct Resolver<'a> {
+pub struct NameResolver<'a> {
     ast: &'a AstArena,
-    pub symbols: SymbolTable,
-    pub errors: Vec<ResolveError>,
+    interner: &'a Interner,
+    symbol_table: SymbolTable,
+    errors: Vec<ResolveError>,
 }
 
-impl<'a> Resolver<'a> {
-    pub fn new(ast: &'a AstArena) -> Self {
+impl<'a> NameResolver<'a> {
+    pub fn new(ast: &'a AstArena, interner: &'a Interner) -> Self {
         Self {
             ast,
-            symbols: SymbolTable::new(),
+            interner,
+            symbol_table: SymbolTable::new(),
             errors: vec![],
         }
     }
 
-    pub fn resolve_package(&mut self, items: &[ItemId], span: Span) -> Result<(), ResolveError> {
-        for item in items {
-            self.resolve_item(&self.ast.items[*item]);
-        }
+    pub fn resolve(mut self, root_id: ItemId) -> (SymbolTable, Vec<ResolveError>) {
+        debug_assert!(self.symbol_table.scopes.len() == 0);
 
-        if self.symbols.current_scope() != 0 {
-            self.errors.push(ResolveError {
-                kind: ResolveErrorKind::ResolverFailed,
-                span,
-            });
-        }
+        let root_scope_id = ScopeId(0);
+        let root_item = &self.ast.items[root_id];
 
-        Ok(())
-    }
-    pub fn resolve_item(&mut self, item: &Item) -> Result<(), ResolveError> {
-        match &item.kind {
-            ItemKind::Module { name, items } => {
-                let parent_scope = self.symbols.current_scope();
-                let module_scope = self.symbols.enter_scope();
+        self.symbol_table.scopes.push(Scope {
+            id: root_scope_id,
+            parent: None,
+            symbols: AHashMap::new(),
+            kind: ScopeKind::Global,
+        });
 
-                self.symbols.set_current_scope(parent_scope);
+        self.symbol_table.item_scopes.insert(root_id, root_scope_id);
 
-                if let Err(e) = self.symbols.define(Symbol {
-                    name: *name,
-                    kind: SymbolKind::Module {
-                        scope_id: module_scope,
-                    },
-                    span: item.span,
-                }) {
-                    self.errors.push(e);
-                }
-
-                self.symbols.set_current_scope(module_scope);
-
+        match &root_item.kind {
+            ItemKind::Module { items } => {
+                // First pass: register items
                 for item in items {
-                    self.resolve_item(&self.ast.items[*item]);
+                    self.register_item(*item, root_scope_id);
                 }
 
-                self.symbols.set_current_scope(parent_scope);
-            }
-            ItemKind::Function {
-                name,
-                params,
-                ret,
-                body,
-            } => {
-                let parent_scope = self.symbols.current_scope();
-                let function_scope = self.symbols.enter_scope();
-
-                // Define function in current scope
-                self.symbols.set_current_scope(parent_scope);
-
-                let param_types = params.iter().map(|p| p.ty.clone()).collect();
-                if let Err(e) = self.symbols.define(Symbol {
-                    name: name.clone(),
-                    kind: SymbolKind::Function {
-                        scope_id: function_scope,
-                        params: param_types,
-                        ret: ret.clone(),
-                    },
-                    span: item.span,
-                }) {
-                    self.errors.push(e);
-                }
-
-                // Enter function scope
-                self.symbols.set_current_scope(function_scope);
-
-                for param in params {
-                    if let Err(e) = self.symbols.define(Symbol {
-                        name: param.name.clone(),
-                        kind: SymbolKind::Variable {
-                            ty: param.ty.clone(),
-                            mutable: param.mutable,
-                        },
-                        span: param.span,
-                    }) {
-                        self.errors.push(e);
-                    }
-                }
-
-                self.resolve_expr(&self.ast.exprs[*body]);
-
-                //Exit function scope
-                self.symbols.set_current_scope(parent_scope);
-            }
-            ItemKind::Struct { name, fields } => {
-                let struct_fields = fields
-                    .iter()
-                    .map(|f| StructField {
-                        name: f.name.clone(),
-                        ty: f.ty.clone(),
-                    })
-                    .collect::<Vec<_>>();
-
-                let mut seen = AHashSet::new();
-                for field in &struct_fields {
-                    if !seen.insert(field.name) {
-                        self.errors.push(ResolveError {
-                            kind: ResolveErrorKind::DuplicateField {
-                                struct_name: *name,
-                                field_name: field.name,
-                            },
-                            span: item.span,
-                        })
-                    }
-                }
-
-                if let Err(e) = self.symbols.define(Symbol {
-                    name: *name,
-                    kind: SymbolKind::Struct {
-                        fields: struct_fields,
-                    },
-                    span: item.span,
-                }) {
-                    self.errors.push(e);
+                // Second pass: resolve names
+                for item in items {
+                    self.resolve_item(*item, root_scope_id);
                 }
             }
+            _ => self.errors.push(ResolveError::Internal {
+                msg: "expected module item as root".to_string(),
+                span: root_item.span,
+            }),
         }
 
-        Ok(())
+        (self.symbol_table, self.errors)
     }
-    fn resolve_expr(&mut self, expr: &Expr) {
-        match &expr.kind {
-            ExprKind::Ident(name) => {
-                if self.symbols.lookup(name).is_none() {
-                    self.errors.push(ResolveError {
-                        kind: ResolveErrorKind::UndefinedVariable(*name),
-                        span: expr.span,
+
+    /// Register item in the given scope
+    fn register_item(&mut self, item_id: ItemId, in_scope: ScopeId) {
+        let item = &self.ast.items[item_id];
+
+        match &item.kind {
+            ItemKind::Module { items } => {
+                let scope = self.symbol_table.get_scope_mut(in_scope);
+
+                let symbol = Symbol {
+                    name: item.name,
+                    kind: SymbolKind::Module { item_id },
+                    def_span: item.span,
+                };
+
+                if let Err((dupe, first_def)) = scope.insert(symbol) {
+                    self.errors.push(ResolveError::DuplicateSymbol {
+                        name: item.name,
+                        first_def,
+                        dupe_def: dupe.def_span,
+                    });
+                }
+
+                // Create module scope and register its items
+                let mod_scope =
+                    self.symbol_table
+                        .new_item_scope(ScopeKind::Module, item_id, in_scope);
+
+                for &child_id in items {
+                    self.register_item(child_id, mod_scope);
+                }
+            }
+
+            ItemKind::Function { .. } => {
+                let scope = self.symbol_table.get_scope_mut(in_scope);
+
+                let symbol = Symbol {
+                    name: item.name,
+                    kind: SymbolKind::Function { item_id },
+                    def_span: item.span,
+                };
+
+                if let Err((dupe, first_def)) = scope.insert(symbol) {
+                    self.errors.push(ResolveError::DuplicateSymbol {
+                        name: item.name,
+                        first_def,
+                        dupe_def: dupe.def_span,
                     });
                 }
             }
-            ExprKind::Block(stmts) => {
-                self.symbols.enter_scope();
-                for stmt in stmts {
-                    self.resolve_stmt(&self.ast.stmts[*stmt]);
-                }
-                self.symbols.exit_scope();
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.resolve_expr(&self.ast.exprs[*cond]);
-                self.resolve_expr(&self.ast.exprs[*then_branch]);
-                if let Some(e) = else_branch {
-                    self.resolve_expr(&self.ast.exprs[*e]);
-                }
-            }
-            ExprKind::While { cond, body } => {
-                self.resolve_expr(&self.ast.exprs[*cond]);
-                self.resolve_expr(&self.ast.exprs[*body]);
-            }
-            ExprKind::Loop(body) => {
-                self.resolve_expr(&self.ast.exprs[*body]);
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                self.resolve_expr(&self.ast.exprs[*lhs]);
-                self.resolve_expr(&self.ast.exprs[*rhs]);
-            }
-            ExprKind::Unary { expr, .. } => {
-                self.resolve_expr(&self.ast.exprs[*expr]);
-            }
-            ExprKind::Assign { tgt, val, .. } => {
-                let tgt = &self.ast.exprs[*tgt];
-                self.resolve_expr(tgt);
 
-                self.resolve_expr(&self.ast.exprs[*val]);
+            ItemKind::Struct { fields } => {
+                use std::collections::hash_map::Entry;
 
-                // Check if target is mutable (if it's a variable)
-                if let ExprKind::Ident(name) = &tgt.kind {
-                    if let Some(symbol) = self.symbols.lookup(name)
-                        && let SymbolKind::Variable { mutable, .. } = symbol.kind
-                    {
-                        if !mutable {
-                            self.errors.push(ResolveError {
-                                kind: ResolveErrorKind::CannotAssignToImmutable(*name),
-                                span: expr.span,
+                // Validate field names
+                let mut seen_fields = AHashMap::new();
+                for field in fields {
+                    match seen_fields.entry(field.name) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(field.span);
+                        }
+                        Entry::Occupied(entry) => {
+                            self.errors.push(ResolveError::DuplicateField {
+                                struct_name: item.name,
+                                field_name: field.name,
+                                first_def: *entry.get(),
+                                dupe_def: field.span,
                             });
                         }
-                    } else {
-                        self.errors.push(ResolveError {
-                            kind: ResolveErrorKind::InvalidAssignmentTarget,
-                            span: tgt.span,
-                        });
                     }
-                } else if !tgt.is_assignable() {
-                    self.errors.push(ResolveError {
-                        kind: ResolveErrorKind::InvalidAssignmentTarget,
-                        span: tgt.span,
+                }
+
+                let scope = self.symbol_table.get_scope_mut(in_scope);
+
+                let symbol = Symbol {
+                    name: item.name,
+                    kind: SymbolKind::Type,
+                    def_span: item.span,
+                };
+
+                if let Err((dupe, first_def)) = scope.insert(symbol) {
+                    self.errors.push(ResolveError::DuplicateSymbol {
+                        name: item.name,
+                        first_def,
+                        dupe_def: dupe.def_span,
                     });
                 }
             }
-            ExprKind::Call { callee, args } => {
-                self.resolve_expr(callee);
-                for arg in args {
-                    self.resolve_expr(arg);
+        }
+    }
+
+    fn resolve_item(&mut self, item_id: ItemId, in_scope: ScopeId) {
+        let item = &self.ast.items[item_id];
+
+        match &item.kind {
+            ItemKind::Module { items } => {
+                let mod_scope = self.symbol_table.item_scopes[&item_id];
+                for &child_item in items {
+                    self.resolve_item(child_item, mod_scope);
                 }
             }
-            ExprKind::Field { object, .. } => {
-                self.resolve_expr(object);
-            }
-            ExprKind::Index { object, index } => {
-                self.resolve_expr(object);
-                self.resolve_expr(index);
-            }
-            ExprKind::Group(expr) => {
-                self.resolve_expr(expr);
-            }
-            ExprKind::Return(expr) => {
-                self.resolve_expr(expr);
-            }
-            ExprKind::Break(expr) => {
-                self.resolve_expr(expr);
-            }
-            ExprKind::ArrayLit(elements) => {
-                for elem in elements {
-                    self.resolve_expr(elem);
-                }
-            }
-            ExprKind::Match { expr, arms } => {
-                self.resolve_expr(expr);
-                for arm in arms {
-                    self.symbols.enter_scope();
+            ItemKind::Function { params, body, .. } => {
+                let func_scope = self.symbol_table.item_scopes[&item_id];
 
-                    self.resolve_pattern(&arm.pattern);
+                for param in params {
+                    self.resolve_type(param.ty, in_scope);
 
-                    if let Some(guard) = &arm.guard {
-                        self.resolve_expr(guard);
+                    let scope = self.symbol_table.get_scope_mut(func_scope);
+
+                    let symbol = Symbol {
+                        name: param.name,
+                        kind: SymbolKind::Variable {
+                            ty: Some(param.ty),
+                            mutable: param.mutable,
+                        },
+                        def_span: param.span,
+                    };
+
+                    if let Err((dupe, first_def)) = scope.insert(symbol) {
+                        self.errors.push(ResolveError::DuplicateSymbol {
+                            name: param.name,
+                            first_def,
+                            dupe_def: dupe.def_span,
+                        });
                     }
+                }
 
-                    self.resolve_expr(&arm.body);
-
-                    self.symbols.exit_scope();
+                self.resolve_expr(*body, func_scope);
+            }
+            ItemKind::Struct { fields } => {
+                for field in fields {
+                    self.resolve_type(field.ty, in_scope);
                 }
             }
+        }
+    }
+
+    fn resolve_stmt(&mut self, stmt_id: StmtId, in_scope: ScopeId) {
+        let stmt = &self.ast.stmts[stmt_id];
+
+        match &stmt.kind {
+            StmtKind::Semi => {}
+            StmtKind::VarDecl {
+                mutable, name, ty, ..
+            } => {
+                if let Some(type_id) = ty {
+                    self.resolve_type(*type_id, in_scope);
+                }
+
+                let symbol = Symbol {
+                    name: *name,
+                    kind: SymbolKind::Variable {
+                        ty: *ty,
+                        mutable: *mutable,
+                    },
+                    def_span: stmt.span,
+                };
+
+                let scope = self.symbol_table.get_scope_mut(in_scope);
+
+                if let Err((dupe, first_def)) = scope.insert(symbol) {
+                    self.errors.push(ResolveError::DuplicateSymbol {
+                        name: *name,
+                        first_def,
+                        dupe_def: dupe.def_span,
+                    });
+                }
+            }
+            StmtKind::Expr { expr, .. } => self.resolve_expr(*expr, in_scope),
+        }
+    }
+
+    fn resolve_expr(&mut self, expr_id: ExprId, in_scope: ScopeId) {
+        let expr = &self.ast.exprs[expr_id];
+
+        match &expr.kind {
             ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
@@ -506,104 +508,132 @@ impl<'a> Resolver<'a> {
             | ExprKind::Null
             | ExprKind::Void
             | ExprKind::Continue => {}
-        }
-    }
-    fn resolve_stmt(&mut self, stmt: &Stmt, ast: &AstArena) {
-        match &stmt.kind {
-            StmtKind::VarDecl {
-                mutable,
-                name,
-                ty,
-                val: value,
-            } => {
-                if let Some(v) = value {
-                    self.resolve_expr(&self.ast.exprs[*v]);
-                }
 
-                // Determine type (inference happens in type checker)
-                let val_ty = match ty {
-                    Some(ty) => *ty,
-                    None => ast.types.insert(Type {
-                        kind: Type::Unknown,
-                        span: stmt.span,
+            ExprKind::ArrayLit(elems) => elems.iter().for_each(|e| self.resolve_expr(*e, in_scope)),
+            ExprKind::Ident(name) => match self.symbol_table.lookup(*name, in_scope) {
+                Some((symbol, _)) => match symbol.kind {
+                    SymbolKind::Variable { .. } | SymbolKind::Function { .. } => {}
+                    _ => self.errors.push(ResolveError::InvalidSymbolInExpression {
+                        name: *name,
+                        span: expr.span,
+                        kind: symbol.kind,
                     }),
-                };
-
-                // Define variable
-                if let Err(e) = self.symbols.define(Symbol {
-                    name: name.clone(),
-                    kind: SymbolKind::Variable {
-                        ty: val_ty,
-                        mutable: false,
-                    },
-                    span: stmt.span,
-                }) {
-                    self.errors.push(e);
-                }
-            }
-
-            StmtKind::Expr { expr, .. } => {
-                self.resolve_expr(&ast.exprs[*expr]);
-            }
-
-            StmtKind::Semi => {}
-        }
-    }
-
-    fn resolve_pattern(&mut self, pattern: &Pattern) {
-        match &*pattern.kind {
-            PatternKind::Wildcard => {}
-            PatternKind::Variable(name) => {
-                if let Err(e) = self.symbols.define(Symbol {
+                },
+                None => self.errors.push(ResolveError::UndefinedSymbol {
                     name: *name,
-                    kind: SymbolKind::Variable {
-                        ty: Type {
-                            kind: Box::new(Type::Unknown),
-                            span: Span::default(),
-                        },
-                        mutable: false,
-                    },
-                    span: pattern.span,
-                }) {
-                    self.errors.push(e);
-                }
+                    use_span: expr.span,
+                }),
+            },
+            ExprKind::Group(e) => self.resolve_expr(*e, in_scope),
+            ExprKind::Unary { expr, .. } => self.resolve_expr(*expr, in_scope),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.resolve_expr(*lhs, in_scope);
+                self.resolve_expr(*rhs, in_scope);
             }
-            PatternKind::Destructure { base, fields } => {
-                if self.symbols.lookup(base).is_none() {
-                    self.errors.push(ResolveError {
-                        kind: ResolveErrorKind::UndefinedType(*base),
-                        span: pattern.span,
-                    });
-                }
+            ExprKind::Assign { tgt, val, .. } => {
+                self.resolve_expr(*tgt, in_scope);
+                self.resolve_expr(*val, in_scope);
+            }
 
-                for (_, field_pattern) in fields {
-                    self.resolve_pattern(field_pattern);
+            ExprKind::Return(e) => self.resolve_expr(*e, in_scope),
+            ExprKind::Break(e) => self.resolve_expr(*e, in_scope),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.resolve_expr(*cond, in_scope);
+                self.resolve_expr(*then_branch, in_scope);
+
+                if let Some(e) = else_branch {
+                    self.resolve_expr(*e, in_scope);
                 }
             }
-            PatternKind::Tuple(patterns) => {
-                for pattern in patterns {
-                    self.resolve_pattern(pattern);
+            ExprKind::Block(stmts) => {
+                let block_scope =
+                    self.symbol_table
+                        .new_expr_scope(ScopeKind::Block, expr_id, in_scope);
+
+                for stmt in stmts {
+                    self.resolve_stmt(*stmt, block_scope);
                 }
+            }
+            ExprKind::While { cond, body } => {
+                self.resolve_expr(*cond, in_scope);
+
+                let loop_scope =
+                    self.symbol_table
+                        .new_expr_scope(ScopeKind::Loop, expr_id, in_scope);
+
+                self.resolve_expr(*body, loop_scope);
+            }
+            ExprKind::Match { expr, arms } => todo!(),
+            ExprKind::Call { callee, args } => {
+                self.resolve_expr(*callee, in_scope);
+
+                for arg in args {
+                    self.resolve_expr(*arg, in_scope);
+                }
+            }
+            ExprKind::Field { object, .. } => {
+                self.resolve_expr(*object, in_scope);
+            }
+            ExprKind::Index { object, index } => {
+                self.resolve_expr(*object, in_scope);
+                self.resolve_expr(*index, in_scope);
+            }
+            ExprKind::Loop(body) => {
+                let loop_scope =
+                    self.symbol_table
+                        .new_expr_scope(ScopeKind::Loop, expr_id, in_scope);
+
+                self.resolve_expr(*body, loop_scope);
             }
         }
     }
 
-    pub fn lookup_qualified(&self, path: &[Ident]) -> Option<&Symbol> {
-        if path.is_empty() {
-            return None;
-        }
+    fn resolve_type(&mut self, type_id: TypeId, in_scope: ScopeId) {
+        let ty = &self.ast.types[type_id];
 
-        let mut symbol = self.symbols.lookup(&path[0])?;
+        match &ty.kind {
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::String
+            | TypeKind::Void
+            | TypeKind::Never
+            | TypeKind::Any => {}
 
-        for component in &path[1..] {
-            match &symbol.kind {
-                SymbolKind::Module { scope_id } => {
-                    symbol = self.symbols.lookup_in_scope(*scope_id, component)?;
+            TypeKind::Path(path) => match self.symbol_table.lookup(*path, in_scope) {
+                Some((symbol, _)) => match symbol.kind {
+                    SymbolKind::Type => {}
+                    _ => self.errors.push(ResolveError::TypeNotFound {
+                        name: *path,
+                        use_span: ty.span,
+                    }),
+                },
+                None => self.errors.push(ResolveError::TypeNotFound {
+                    name: *path,
+                    use_span: ty.span,
+                }),
+            },
+
+            TypeKind::Optional(inner) => {
+                self.resolve_type(*inner, in_scope);
+            }
+            TypeKind::Array { ty, len } => {
+                self.resolve_type(*ty, in_scope);
+                self.resolve_expr(*len, in_scope); // Array length expression
+            }
+            TypeKind::DynArray(inner) => {
+                self.resolve_type(*inner, in_scope);
+            }
+            TypeKind::Function { params, ret } => {
+                for param_ty in params {
+                    self.resolve_type(*param_ty, in_scope);
                 }
-                _ => return None,
+                self.resolve_type(*ret, in_scope);
             }
         }
-
-        Some(symbol)
     }
 }

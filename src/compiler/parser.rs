@@ -94,10 +94,8 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             is_pub: true,
-            kind: ItemKind::Module {
-                name: self.interner.get_or_intern_static("<package>"),
-                items,
-            },
+            name: self.interner.get_or_intern_static("<package>"),
+            kind: ItemKind::Module { items },
             span: Span::default().merge(self.current.span),
         })
     }
@@ -131,10 +129,8 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             is_pub,
-            kind: ItemKind::Module {
-                name: self.interner.get_or_intern(name.lexeme),
-                items,
-            },
+            name: self.interner.get_or_intern(name.lexeme),
+            kind: ItemKind::Module { items },
             span: mod_token.span.merge(r_brace.span),
         })
     }
@@ -179,10 +175,10 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             is_pub,
+            name: self.interner.get_or_intern(func_name.lexeme),
             span: fn_token.span.merge(body.span),
             kind: ItemKind::Function {
                 params,
-                name: self.interner.get_or_intern(func_name.lexeme),
                 ret: self.ast.types.insert(ret),
                 body: self.ast.exprs.insert(body),
             },
@@ -198,10 +194,8 @@ impl<'a> Parser<'a> {
 
             return Ok(Item {
                 is_pub,
-                kind: ItemKind::Struct {
-                    name: self.interner.get_or_intern(struct_name.lexeme),
-                    fields: vec![],
-                },
+                name: self.interner.get_or_intern(struct_name.lexeme),
+                kind: ItemKind::Struct { fields: vec![] },
                 span: struct_token.span.merge(semi.span),
             });
         }
@@ -229,10 +223,8 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             is_pub,
-            kind: ItemKind::Struct {
-                name: self.interner.get_or_intern(struct_name.lexeme),
-                fields,
-            },
+            name: self.interner.get_or_intern(struct_name.lexeme),
+            kind: ItemKind::Struct { fields },
             span: struct_token.span.merge(r_brace.span),
         })
     }
@@ -261,12 +253,9 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let val = if self.advance_if(tt![=])? {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
+        self.expect(tt![=])?;
 
+        let val = self.parse_expr()?;
         let semi_token = self.expect(tt![;])?;
 
         Ok(Stmt {
@@ -274,7 +263,7 @@ impl<'a> Parser<'a> {
                 mutable: is_mut,
                 name: self.interner.get_or_intern(val_name.lexeme),
                 ty: ty.map(|t| self.ast.types.insert(t)),
-                val: val.map(|v| self.ast.exprs.insert(v)),
+                val: self.ast.exprs.insert(val),
             },
             span: val_token.span.merge(semi_token.span),
         })
@@ -293,8 +282,8 @@ impl<'a> Parser<'a> {
             tt![bool] => TypeKind::Bool,
             tt![void] => TypeKind::Void,
             tt![ident] => {
-                let path = self.parse_path()?;
-                TypeKind::Path(self.ast.paths.insert(path))
+                let path = self.expect(tt![ident])?;
+                TypeKind::Path(self.interner.get_or_intern(path.lexeme))
             }
             tt!['['] => {
                 let inner = self.parse_type()?;
