@@ -1,5 +1,7 @@
-use super::tokens::{Span, Token, TokenType};
-use crate::tt;
+use simple_ternary::tnr;
+
+use super::tokens::{Span, Token};
+use crate::{compiler::tokens::TokenType, tt};
 
 // Error Types
 #[derive(Debug)]
@@ -14,7 +16,7 @@ pub enum LexErrorKind {
 pub struct LexError {
     pub kind: LexErrorKind,
     pub span: Span,
-    pub hint: Option<String>,
+    pub hint: String,
 }
 
 pub type LexResult<'a> = Result<Token<'a>, LexError>;
@@ -87,21 +89,27 @@ impl<'a> Lexer<'a> {
             '[' => Ok(self.make_single(tt!['['], o)),
             ']' => Ok(self.make_single(tt![']'], o)),
             ',' => Ok(self.make_single(tt![,], o)),
-            '.' => Ok(self.make_single(tt![.], o)),
             ';' => Ok(self.make_single(tt![;], o)),
-            '?' => Ok(self.make_single(tt![?], o)),
+            '@' => Ok(self.make_single(tt![@], o)),
 
             // Double symbols
-            '=' => Ok(self.make_equals(o)),
-            '-' => Ok(self.make_minus(o)),
+            '.' => Ok(self.make_double('.', tt![.], tt![..], o)),
+            '?' => Ok(self.make_double('?', tt![?], tt![??], o)),
             ':' => Ok(self.make_double(':', tt![:], tt![::], o)),
             '!' => Ok(self.make_double('=', tt![!], tt![!=], o)),
-            '>' => Ok(self.make_double('=', tt![>], tt![>=], o)),
-            '<' => Ok(self.make_double('=', tt![<], tt![<=], o)),
-            '%' => Ok(self.make_double('=', tt![%], tt![%=], o)),
             '+' => Ok(self.make_double('=', tt![+], tt![+=], o)),
             '*' => Ok(self.make_double('=', tt![*], tt![*=], o)),
             '/' => Ok(self.make_double('=', tt![/], tt![/=], o)),
+            '%' => Ok(self.make_double('=', tt![%], tt![%=], o)),
+            '&' => Ok(self.make_double('=', tt![&], tt![&=], o)),
+            '|' => Ok(self.make_double('=', tt![|], tt![|=], o)),
+            '^' => Ok(self.make_double('=', tt![^], tt![^=], o)),
+
+            // Complex double or triple symbols
+            '=' => Ok(self.make_equals(o)),
+            '-' => Ok(self.make_minus(o)),
+            '>' => Ok(self.make_greater(o)),
+            '<' => Ok(self.make_less(o)),
 
             // String literals
             '"' => self.make_string(o),
@@ -112,15 +120,10 @@ impl<'a> Lexer<'a> {
             // Idents
             c if c.is_ascii_alphabetic() || c == '_' => Ok(self.make_ident_or_kw(o)),
 
-            // Syntax err.
             c => Err(LexError {
                 kind: LexErrorKind::UnexpectedChar(c),
                 span: Span::new(o, self.byte_pos, self.line, self.column),
-                hint: match ch {
-                    '@' | '$' => Some("This symbol is not used in the language".into()),
-                    '`' => Some("Did you mean a single quote (')?".into()),
-                    _ => None,
-                },
+                hint: tnr! {ch == '`' => "Did you mean a single quote (')?" : ""}.into(),
             }),
         }
     }
@@ -159,49 +162,32 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn make_single(&mut self, ty: TokenType, start_byte: usize) -> Token<'a> {
+    #[inline]
+    fn make_single(&mut self, ty: TokenType, start: usize) -> Token<'a> {
         self.advance();
-        self.make_token(ty, start_byte, &self.input[start_byte..self.byte_pos])
+        self.make_token(ty, start, &self.input[start..self.byte_pos])
     }
 
     fn make_double(
         &mut self,
-        second_char: char,
-        single_type: TokenType,
-        double_type: TokenType,
+        second_ch: char,
+        single: TokenType,
+        double: TokenType,
         start_byte: usize,
     ) -> Token<'a> {
         self.advance();
-        if let Some((_, ch)) = self.current
-            && ch == second_char
-        {
-            self.advance();
-            self.make_token(
-                double_type,
-                start_byte,
-                &self.input[start_byte..self.byte_pos],
-            )
-        } else {
-            self.make_token(
-                single_type,
-                start_byte,
-                &self.input[start_byte..start_byte + 1],
-            )
+        match self.current {
+            Some((_, ch)) if ch == second_ch => self.make_single(double, start_byte),
+            _ => self.make_token(single, start_byte, &self.input[start_byte..self.byte_pos]),
         }
     }
 
     fn make_equals(&mut self, start_byte: usize) -> Token<'a> {
         self.advance(); // Consume '='
         match self.current {
-            Some((_, '=')) => {
-                self.advance();
-                self.make_token(tt![==], start_byte, &self.input[start_byte..self.byte_pos])
-            }
-            Some((_, '>')) => {
-                self.advance();
-                self.make_token(tt![=>], start_byte, &self.input[start_byte..self.byte_pos])
-            }
-            _ => self.make_token(tt![=], start_byte, &self.input[start_byte..start_byte + 1]),
+            Some((_, '=')) => self.make_single(tt![==], start_byte),
+            Some((_, '>')) => self.make_single(tt![=>], start_byte),
+            _ => self.make_token(tt![=], start_byte, &self.input[start_byte..self.byte_pos]),
         }
     }
 
@@ -209,15 +195,29 @@ impl<'a> Lexer<'a> {
         self.advance(); // Consume '='
 
         match self.current {
-            Some((_, '=')) => {
-                self.advance();
-                self.make_token(tt![-=], start_byte, &self.input[start_byte..self.byte_pos])
-            }
-            Some((_, '>')) => {
-                self.advance();
-                self.make_token(tt![->], start_byte, &self.input[start_byte..self.byte_pos])
-            }
+            Some((_, '=')) => self.make_single(tt![-=], start_byte),
+            Some((_, '>')) => self.make_single(tt![->], start_byte),
             _ => self.make_token(tt![-], start_byte, &self.input[start_byte..start_byte + 1]),
+        }
+    }
+
+    fn make_greater(&mut self, start_byte: usize) -> Token<'a> {
+        self.advance();
+
+        match self.current {
+            Some((_, '=')) => self.make_single(tt![>=], start_byte),
+            Some((_, '>')) => self.make_double('=', tt![>>], tt![>>=], start_byte),
+            _ => self.make_token(tt![>], start_byte, &self.input[start_byte..self.byte_pos]),
+        }
+    }
+
+    fn make_less(&mut self, start_byte: usize) -> Token<'a> {
+        self.advance();
+
+        match self.current {
+            Some((_, '=')) => self.make_single(tt![<=], start_byte),
+            Some((_, '<')) => self.make_double('=', tt![<<], tt![<<=], start_byte),
+            _ => self.make_token(tt![>], start_byte, &self.input[start_byte..self.byte_pos]),
         }
     }
 
@@ -242,30 +242,27 @@ impl<'a> Lexer<'a> {
                     self.advance();
 
                     return Ok(self.make_token(
-                        TokenType::StringLit,
+                        tt![str_lit],
                         start_byte,
                         &self.input[start_byte..end_byte],
                     ));
                 }
-                '\n' if escape => break,
-                _ => {
-                    if escape {
-                        match ch {
-                            'n' | 't' | 'r' | '\\' | '"' | '\'' => {
-                                escape = false;
-                                self.advance();
-                            }
-                            _ => {
-                                return Err(LexError {
-                                    kind: LexErrorKind::InvalidEscape(ch),
-                                    span: Span::new(byte, end_byte, self.line, self.column),
-                                    hint: Some(r#"Valid escapes: \n, \t, \r, \\, \", \'"#.into()),
-                                });
-                            }
-                        }
-                    } else {
+                c if escape => match c {
+                    'n' | 't' | 'r' | '\\' | '"' | '\'' => {
+                        escape = false;
                         self.advance();
                     }
+                    _ => {
+                        return Err(LexError {
+                            kind: LexErrorKind::InvalidEscape(ch),
+                            span: Span::new(byte, end_byte, self.line, self.column),
+                            hint: r#"Valid escapes: \n, \t, \r, \\, \", \'"#.into(),
+                        });
+                    }
+                },
+                _ => {
+                    escape = false;
+                    self.advance();
                 }
             }
         }
@@ -274,12 +271,12 @@ impl<'a> Lexer<'a> {
         Err(LexError {
             kind: LexErrorKind::UnterminatedString,
             span: Span::new(start_byte, self.byte_pos, start_line, start_col),
-            hint: Some("Unterminated string. Did you forget a closing `\"`?".to_string()),
+            hint: r#"Did you forget a closing `"`?"#.into(),
         })
     }
 
     fn make_number(&mut self, start_byte: usize) -> Token<'a> {
-        let mut is_float = false;
+        let mut ty = tt![int_lit];
         let mut end_byte = start_byte;
 
         while let Some((byte_pos, ch)) = self.current {
@@ -288,20 +285,14 @@ impl<'a> Lexer<'a> {
                     end_byte = byte_pos + ch.len_utf8();
                     self.advance();
                 }
-                '.' if !is_float => {
-                    is_float = true;
+                '.' if ty != tt![float_lit] => {
+                    ty = tt![float_lit];
                     end_byte = byte_pos + ch.len_utf8();
                     self.advance();
                 }
                 _ => break,
             }
         }
-
-        let ty = if is_float {
-            TokenType::FloatLit
-        } else {
-            TokenType::IntLit
-        };
 
         self.make_token(ty, start_byte, &self.input[start_byte..end_byte])
     }
@@ -323,32 +314,46 @@ impl<'a> Lexer<'a> {
         let ty = match lexeme {
             "and" => tt![and],
             "any" => tt![any],
+            "as" => tt![as],
             "bool" => tt![bool],
             "break" => tt![break],
+            "char" => tt![char],
+            "comptime" => tt![comptime],
+            "const" => tt![const],
             "continue" => tt![continue],
+            "cstr" => tt![cstr],
             "else" => tt![else],
+            "enum" => tt![enum],
             "false" => tt![false],
             "float" => tt![float],
             "fn" => tt![fn],
             "for" => tt![for],
             "if" => tt![if],
+            "import" => tt![import],
+            "in" => tt![in],
             "int" => tt![int],
             "loop" => tt![loop],
+            "macro" => tt![macro],
             "match" => tt![match],
             "mod" => tt![mod],
+            "mut" => tt![mut],
             "null" => tt![null],
             "or" => tt![or],
             "pub" => tt![pub],
             "return" => tt![return],
+            "Self" => tt![Self],
+            "static" => tt![static],
             "str" => tt![str],
             "struct" => tt![struct],
-            "self" => tt![self],
+            "trait" => tt![trait],
             "true" => tt![true],
+            "type" => tt![type],
+            "use" => tt![use],
             "val" => tt![val],
             "var" => tt![var],
-            "while" => tt![while],
             "void" => tt![void],
-            _ => TokenType::Ident,
+            "while" => tt![while],
+            _ => tt![ident],
         };
 
         self.make_token(ty, start_byte, lexeme)

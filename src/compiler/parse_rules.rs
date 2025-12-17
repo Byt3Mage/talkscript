@@ -11,6 +11,7 @@ pub enum PrefixRule {
     LiteralNull,
     LiteralVoid,
     LiteralArray,
+    LiteralStruct,
     Identifier,
     Grouping,
     Unary,
@@ -137,7 +138,7 @@ static RULES: [ParseRule; TokenType::COUNT] = {
     };
 
     rules[tt![.] as usize] = ParseRule {
-        prefix: PrefixRule::None,
+        prefix: PrefixRule::LiteralStruct,
         infix: InfixRule::Dot,
         precedence: Precedence::Call,
     };

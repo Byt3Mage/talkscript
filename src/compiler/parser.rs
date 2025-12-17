@@ -1,14 +1,20 @@
+use simple_ternary::tnr;
+
 use super::{
     ast::{
-        AssignOp, AstArena, BinaryOp, Expr, ExprKind, Field, Item, ItemKind, Param, Path, Stmt,
-        StmtKind, Type, UnaryOp,
+        AssignOp, AstArena, BinaryOp, Expr, ExprKind, Item, ItemKind, NamedField, Param, Path,
+        Stmt, StmtKind, Type, UnaryOp,
     },
     lexer::{LexError, Lexer},
     parse_rules::{InfixRule, ParseRule, Precedence, PrefixRule},
     tokens::{Span, Token, TokenType},
 };
 
-use crate::{arena::Interner, compiler::ast::TypeKind, tt};
+use crate::{
+    arena::Interner,
+    compiler::ast::{ItemId, Pattern, TypeKind, Visibility},
+    tt,
+};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -85,28 +91,33 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse_source(&mut self) -> ParseResult<Item> {
+    pub fn parse_source(&mut self) -> ParseResult<ItemId> {
         let mut items = vec![];
+
         while !self.check(tt![eof]) {
             let item = self.parse_item()?;
             items.push(self.ast.items.insert(item));
         }
 
-        Ok(Item {
-            is_pub: true,
+        let item = Item {
+            vis: Visibility::Public,
             name: self.interner.get_or_intern_static("<package>"),
             kind: ItemKind::Module { items },
             span: Span::default().merge(self.current.span),
-        })
+        };
+
+        Ok(self.ast.items.insert(item))
     }
 
     fn parse_item(&mut self) -> ParseResult<Item> {
         let is_pub = self.advance_if(tt![pub])?;
+        let vis = tnr! { is_pub => Visibility::Public : Visibility::Private};
 
         match self.current.ty {
-            tt![mod] => self.parse_module(is_pub),
-            tt![fn] => self.parse_function(is_pub),
-            tt![struct] => self.parse_struct(is_pub),
+            tt![mod] => self.parse_module(vis),
+            tt![fn] => self.parse_function(vis),
+            tt![struct] => self.parse_struct(vis),
+            tt![type] => todo!("parse_type_alias(vis)"),
             tt => Err(ParseError {
                 msg: format!("Expected item, found {tt:?}"),
                 span: self.current.span,
@@ -114,12 +125,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_module(&mut self, is_pub: bool) -> ParseResult<Item> {
+    fn parse_module(&mut self, vis: Visibility) -> ParseResult<Item> {
         let mod_token = self.expect(tt![mod])?;
         let name = self.expect(tt![ident])?;
         self.expect(tt!['{'])?;
 
         let mut items = vec![];
+
         while !matches!(self.current.ty, tt!['}'] | tt![eof]) {
             let item = self.parse_item()?;
             items.push(self.ast.items.insert(item));
@@ -128,7 +140,7 @@ impl<'a> Parser<'a> {
         let r_brace = self.expect(tt!['}'])?;
 
         Ok(Item {
-            is_pub,
+            vis,
             name: self.interner.get_or_intern(name.lexeme),
             kind: ItemKind::Module { items },
             span: mod_token.span.merge(r_brace.span),
@@ -139,19 +151,20 @@ impl<'a> Parser<'a> {
         let fn_token = self.expect(tt![fn])?;
         let func_name = self.expect(tt![ident])?;
 
+        le
         self.expect(tt!['('])?;
+
+        let mut generics
 
         let mut params = vec![];
         while !matches!(self.current.ty, tt![')'] | tt![eof]) {
-            let mutable = self.advance_if(tt![var])?;
-            let name = self.expect(tt![ident])?;
+            let pattern = self.parse_pattern()?;
             self.expect(tt![:])?;
             let ty = self.parse_type()?;
 
             params.push(Param {
-                mutable,
-                name: self.interner.get_or_intern(name.lexeme),
-                span: name.span,
+                span: pattern.span.merge(ty.span),
+                pattern: self.ast.patterns.insert(pattern),
                 ty: self.ast.types.insert(ty),
             });
 
@@ -174,7 +187,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block()?;
 
         Ok(Item {
-            is_pub,
+            vis,
             name: self.interner.get_or_intern(func_name.lexeme),
             span: fn_token.span.merge(body.span),
             kind: ItemKind::Function {
@@ -195,7 +208,7 @@ impl<'a> Parser<'a> {
             return Ok(Item {
                 is_pub,
                 name: self.interner.get_or_intern(struct_name.lexeme),
-                kind: ItemKind::Struct { fields: vec![] },
+                kind: ItemKind::DataType { fields: vec![] },
                 span: struct_token.span.merge(semi.span),
             });
         }
@@ -208,7 +221,7 @@ impl<'a> Parser<'a> {
             self.expect(tt![:])?;
             let ty = self.parse_type()?;
 
-            fields.push(Field {
+            fields.push(NamedField {
                 span: name.span.merge(ty.span),
                 name: self.interner.get_or_intern(name.lexeme),
                 ty: self.ast.types.insert(ty),
@@ -224,9 +237,13 @@ impl<'a> Parser<'a> {
         Ok(Item {
             is_pub,
             name: self.interner.get_or_intern(struct_name.lexeme),
-            kind: ItemKind::Struct { fields },
+            kind: ItemKind::DataType { fields },
             span: struct_token.span.merge(r_brace.span),
         })
+    }
+
+    fn parse_pattern(&mut self) -> ParseResult<Pattern> {
+        todo!("parse pattern")
     }
 
     fn parse_semi(&mut self) -> ParseResult<Stmt> {
@@ -453,7 +470,7 @@ impl<'a> Parser<'a> {
         let str_token = self.expect(tt![str_lit])?;
 
         Ok(Expr {
-            kind: ExprKind::String(self.interner.get_or_intern(str_token.lexeme)),
+            kind: ExprKind::CStr(self.interner.get_or_intern(str_token.lexeme)),
             span: str_token.span,
         })
     }

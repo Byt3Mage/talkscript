@@ -6,71 +6,100 @@ pub(crate) enum TokenType {
     IntLit,
     FloatLit,
     StringLit,
+    CharLit,
 
-    // Single symbols
-    RightParen,
-    LeftParen,
-    RightBrace,
-    LeftBrace,
-    RightBracket,
-    LeftBracket,
-    Comma,
-    Dot,
-    Semicolon,
-    Question,
+    // Single character symbols
+    LeftParen,    // (
+    RightParen,   // )
+    LeftBrace,    // {
+    RightBrace,   // }
+    LeftBracket,  // [
+    RightBracket, // ]
+    Comma,        // ,
+    Dot,          // .
+    Semicolon,    // ;
+    Question,     // ?
+    Colon,        // :
+    At,           // @
 
-    // Single or double symbols
-    Arrow,
-    Bang,
-    BangEqual,
-    Colon,
-    ColonColon,
-    Equal,
-    EqualEqual,
-    FatArrow,
-    Greater,
-    GreaterEqual,
-    Less,
-    LessEqual,
-    Minus,
-    MinusEqual,
-    Percent,
-    PercentEqual,
-    Plus,
-    PlusEqual,
-    Star,
-    StarEqual,
-    Slash,
-    SlashEqual,
+    // One or two character symbols
+    Bang,                // !
+    BangEqual,           // !=
+    Equal,               // =
+    EqualEqual,          // ==
+    Greater,             // >
+    GreaterEqual,        // >=
+    GreaterGreater,      // >>
+    GreaterGreaterEqual, // >>=
+    Less,                // <
+    LessEqual,           // <=
+    LessLess,            // <<
+    LessLessEqual,       // <<=
+    Plus,                // +
+    PlusEqual,           // +=
+    Minus,               // -
+    MinusEqual,          // -=
+    Arrow,               // ->
+    Star,                // *
+    StarEqual,           // *=
+    Slash,               // /
+    SlashEqual,          // /=
+    Percent,             // %
+    PercentEqual,        // %=
+    Ampersand,           // &
+    AmpersandEqual,      // &=
+    Pipe,                // |
+    PipeEqual,           // |=
+    Caret,               // ^
+    CaretEqual,          // ^=
+    ColonColon,          // ::
+    DotDot,              // ..
+    DotDotEqual,         // ..=
+    QuestionQuestion,    // ??
+    FatArrow,            // =>
 
     // Keywords
     And,
     Any,
+    As,
     Bool,
     Break,
+    Char,
+    Comptime,
+    Const,
     Continue,
+    Cstr,
     Else,
+    Enum,
     False,
     Float,
     Fn,
     For,
     If,
+    Import,
+    In,
     Int,
     Loop,
+    Macro,
     Match,
     Mod,
+    Mut,
     Null,
     Or,
     Pub,
     Return,
-    Struct,
+    SelfTy,
+    Static,
     Str,
-    This,
+    Struct,
+    Trait,
     True,
+    Type,
+    Use,
     Val,
     Var,
-    While,
     Void,
+    While,
 
     // End of file
     Eof,
@@ -80,23 +109,26 @@ impl TokenType {
     pub const COUNT: usize = TokenType::Eof as usize + 1;
 }
 
+/// Macro for convenient token type matching
 #[macro_export]
 macro_rules! tt {
     (ident) => {
         $crate::compiler::tokens::TokenType::Ident
     };
-
     (int_lit) => {
         $crate::compiler::tokens::TokenType::IntLit
     };
-
     (float_lit) => {
         $crate::compiler::tokens::TokenType::FloatLit
     };
-
     (str_lit) => {
         $crate::compiler::tokens::TokenType::StringLit
     };
+    (char_lit) => {
+        $crate::compiler::tokens::TokenType::CharLit
+    };
+
+    // Single character
     ('(') => {
         $crate::compiler::tokens::TokenType::LeftParen
     };
@@ -124,25 +156,19 @@ macro_rules! tt {
     (;) => {
         $crate::compiler::tokens::TokenType::Semicolon
     };
-    (?) => {
-        $crate::compiler::tokens::TokenType::Question
+    (:) => {
+        $crate::compiler::tokens::TokenType::Colon
+    };
+    (@) => {
+        $crate::compiler::tokens::TokenType::At
     };
 
-    // Single/double symbols
-    (->) => {
-        $crate::compiler::tokens::TokenType::Arrow
-    };
+    // One or two character
     (!) => {
         $crate::compiler::tokens::TokenType::Bang
     };
     (!=) => {
         $crate::compiler::tokens::TokenType::BangEqual
-    };
-    (:) => {
-        $crate::compiler::tokens::TokenType::Colon
-    };
-    (::) => {
-        $crate::compiler::tokens::TokenType::ColonColon
     };
     (=) => {
         $crate::compiler::tokens::TokenType::Equal
@@ -156,8 +182,11 @@ macro_rules! tt {
     (>=) => {
         $crate::compiler::tokens::TokenType::GreaterEqual
     };
-    (=>) => {
-        $crate::compiler::tokens::TokenType::FatArrow
+    (>>) => {
+        $crate::compiler::tokens::TokenType::GreaterGreater
+    };
+    (>>=) => {
+        $crate::compiler::tokens::TokenType::GreaterGreaterEqual
     };
     (<) => {
         $crate::compiler::tokens::TokenType::Less
@@ -165,23 +194,26 @@ macro_rules! tt {
     (<=) => {
         $crate::compiler::tokens::TokenType::LessEqual
     };
-    (-) => {
-        $crate::compiler::tokens::TokenType::Minus
+    (<<) => {
+        $crate::compiler::tokens::TokenType::LessLess
     };
-    (-=) => {
-        $crate::compiler::tokens::TokenType::MinusEqual
-    };
-    (%) => {
-        $crate::compiler::tokens::TokenType::Percent
-    };
-    (%=) => {
-        $crate::compiler::tokens::TokenType::PercentEqual
+    (<<=) => {
+        $crate::compiler::tokens::TokenType::LessLessEqual
     };
     (+) => {
         $crate::compiler::tokens::TokenType::Plus
     };
     (+=) => {
         $crate::compiler::tokens::TokenType::PlusEqual
+    };
+    (-) => {
+        $crate::compiler::tokens::TokenType::Minus
+    };
+    (-=) => {
+        $crate::compiler::tokens::TokenType::MinusEqual
+    };
+    (->) => {
+        $crate::compiler::tokens::TokenType::Arrow
     };
     (*) => {
         $crate::compiler::tokens::TokenType::Star
@@ -195,6 +227,48 @@ macro_rules! tt {
     (/=) => {
         $crate::compiler::tokens::TokenType::SlashEqual
     };
+    (%) => {
+        $crate::compiler::tokens::TokenType::Percent
+    };
+    (%=) => {
+        $crate::compiler::tokens::TokenType::PercentEqual
+    };
+    (&) => {
+        $crate::compiler::tokens::TokenType::Ampersand
+    };
+    (&=) => {
+        $crate::compiler::tokens::TokenType::AmpersandEqual
+    };
+    (|) => {
+        $crate::compiler::tokens::TokenType::Pipe
+    };
+    (|=) => {
+        $crate::compiler::tokens::TokenType::PipeEqual
+    };
+    (^) => {
+        $crate::compiler::tokens::TokenType::Caret
+    };
+    (^=) => {
+        $crate::compiler::tokens::TokenType::CaretEqual
+    };
+    (::) => {
+        $crate::compiler::tokens::TokenType::ColonColon
+    };
+    (..) => {
+        $crate::compiler::tokens::TokenType::DotDot
+    };
+    (..=) => {
+        $crate::compiler::tokens::TokenType::DotDotEqual
+    };
+    (?) => {
+        $crate::compiler::tokens::TokenType::Question
+    };
+    (??) => {
+        $crate::compiler::tokens::TokenType::QuestionQuestion
+    };
+    (=>) => {
+        $crate::compiler::tokens::TokenType::FatArrow
+    };
 
     // Keywords
     (and) => {
@@ -203,17 +277,35 @@ macro_rules! tt {
     (any) => {
         $crate::compiler::tokens::TokenType::Any
     };
+    (as) => {
+        $crate::compiler::tokens::TokenType::As
+    };
     (bool) => {
         $crate::compiler::tokens::TokenType::Bool
     };
     (break) => {
         $crate::compiler::tokens::TokenType::Break
     };
+    (char) => {
+        $crate::compiler::tokens::TokenType::Char
+    };
+    (comptime) => {
+        $crate::compiler::tokens::TokenType::Comptime
+    };
+    (const) => {
+        $crate::compiler::tokens::TokenType::Const
+    };
     (continue) => {
         $crate::compiler::tokens::TokenType::Continue
     };
+    (cstr) => {
+        $crate::compiler::tokens::TokenType::Cstr
+    };
     (else) => {
         $crate::compiler::tokens::TokenType::Else
+    };
+    (enum) => {
+        $crate::compiler::tokens::TokenType::Enum
     };
     (false) => {
         $crate::compiler::tokens::TokenType::False
@@ -230,17 +322,29 @@ macro_rules! tt {
     (if) => {
         $crate::compiler::tokens::TokenType::If
     };
+    (import) => {
+        $crate::compiler::tokens::TokenType::Import
+    };
+    (in) => {
+        $crate::compiler::tokens::TokenType::In
+    };
     (int) => {
         $crate::compiler::tokens::TokenType::Int
     };
     (loop) => {
         $crate::compiler::tokens::TokenType::Loop
     };
+    (macro) => {
+        $crate::compiler::tokens::TokenType::Macro
+    };
     (match) => {
         $crate::compiler::tokens::TokenType::Match
     };
     (mod) => {
         $crate::compiler::tokens::TokenType::Mod
+    };
+    (mut) => {
+        $crate::compiler::tokens::TokenType::Mut
     };
     (null) => {
         $crate::compiler::tokens::TokenType::Null
@@ -254,17 +358,29 @@ macro_rules! tt {
     (return) => {
         $crate::compiler::tokens::TokenType::Return
     };
+    (Self) => {
+        $crate::compiler::tokens::TokenType::SelfTy
+    };
+    (static) => {
+        $crate::compiler::tokens::TokenType::Static
+    };
     (str) => {
         $crate::compiler::tokens::TokenType::Str
     };
     (struct) => {
         $crate::compiler::tokens::TokenType::Struct
     };
-    (self) => {
-        $crate::compiler::tokens::TokenType::This
+    (trait) => {
+        $crate::compiler::tokens::TokenType::Trait
     };
     (true) => {
         $crate::compiler::tokens::TokenType::True
+    };
+    (type) => {
+        $crate::compiler::tokens::TokenType::Type
+    };
+    (use) => {
+        $crate::compiler::tokens::TokenType::Use
     };
     (val) => {
         $crate::compiler::tokens::TokenType::Val
@@ -272,12 +388,13 @@ macro_rules! tt {
     (var) => {
         $crate::compiler::tokens::TokenType::Var
     };
-    (while) => {
-        $crate::compiler::tokens::TokenType::While
-    };
     (void) => {
         $crate::compiler::tokens::TokenType::Void
     };
+    (while) => {
+        $crate::compiler::tokens::TokenType::While
+    };
+
     (eof) => {
         $crate::compiler::tokens::TokenType::Eof
     };
