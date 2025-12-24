@@ -18,11 +18,13 @@ pub(crate) enum TokenType {
     Comma,        // ,
     Dot,          // .
     Semicolon,    // ;
-    Question,     // ?
     Colon,        // :
     At,           // @
 
     // One or two character symbols
+    Question,            // ?
+    QuestionDot,         // ?.
+    QuestionQuestion,    // ??
     Bang,                // !
     BangEqual,           // !=
     Equal,               // =
@@ -55,7 +57,6 @@ pub(crate) enum TokenType {
     ColonColon,          // ::
     DotDot,              // ..
     DotDotEqual,         // ..=
-    QuestionQuestion,    // ??
     FatArrow,            // =>
 
     // Keywords
@@ -262,6 +263,9 @@ macro_rules! tt {
     };
     (?) => {
         $crate::compiler::tokens::TokenType::Question
+    };
+    (?.) => {
+        $crate::compiler::tokens::TokenType::QuestionDot
     };
     (??) => {
         $crate::compiler::tokens::TokenType::QuestionQuestion

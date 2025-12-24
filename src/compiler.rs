@@ -1,10 +1,13 @@
 mod ast;
+mod canon_ast;
+mod comptime_evaluator;
+mod comptime_value;
 mod lexer;
 mod parse_rules;
 mod parser;
 mod resolver;
 mod tokens;
-mod type_checker;
+mod type_info;
 
 #[cfg(test)]
 use crate::{

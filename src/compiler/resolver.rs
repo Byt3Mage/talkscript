@@ -1,55 +1,75 @@
 use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
-use simple_ternary::tnr;
 
 use crate::{
-    arena::Interner,
+    arena::{Ident, Interner},
     compiler::{
-        ast::{
-            AstArena, ExprId, ExprKind, Ident, ItemId, ItemKind, PathId, PatternId, PatternKind,
-            StmtId, StmtKind, TypeId, TypeKind,
+        canon_ast::{
+            CanonAstArena, DeclId, DeclKind, ExprId, ExprKind, PatternId, PatternKind, StmtId,
+            StmtKind,
         },
         tokens::Span,
     },
 };
 
+#[derive(Debug, Clone)]
+pub enum ResolveError {
+    DuplicateSymbol {
+        name: Ident,
+        first_def: Span,
+        dupe_def: Span,
+    },
+    UndefinedSymbol {
+        name: Ident,
+        use_span: Span,
+    },
+    BreakOutsideLoop {
+        span: Span,
+    },
+    ContinueOutsideLoop {
+        span: Span,
+    },
+    ReturnOutsideFunction {
+        span: Span,
+    },
+    RootNotModule,
+}
+
+pub enum SymbolId {
+    None,
+    Decl(DeclId),
+}
 pub struct Symbol {
-    name: Ident,
-    kind: SymbolKind,
-    span: Span,
+    pub id: SymbolId,
+    pub name: Ident,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolKind {
-    Module,
-    Function,
-    Variable,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScopeId {
+    Decl(DeclId),
+    Expr(ExprId),
 }
-
-pub type ScopeId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScopeKind {
     Global,
-    Module,
-    DataType,
+    Type,
     Function,
     Block,
     Loop,
 }
 
 pub struct Scope {
-    id: ScopeId,
     kind: ScopeKind,
     parent: Option<ScopeId>,
     symbols: AHashMap<Ident, Symbol>,
 }
 
 impl Scope {
-    pub fn new(id: ScopeId, parent: Option<ScopeId>, kind: ScopeKind) -> Self {
+    pub fn new(kind: ScopeKind, parent: Option<ScopeId>) -> Self {
         Self {
-            id,
             kind,
             parent,
             symbols: AHashMap::new(),
@@ -57,8 +77,6 @@ impl Scope {
     }
 
     pub fn define(&mut self, symbol: Symbol) -> Result<(), (Symbol, Span)> {
-        use std::collections::hash_map::Entry;
-
         match self.symbols.entry(symbol.name) {
             Entry::Occupied(entry) => Err((symbol, entry.get().span)),
             Entry::Vacant(entry) => {
@@ -70,133 +88,75 @@ impl Scope {
 }
 
 pub struct SymbolTable {
-    scopes: Vec<Scope>,
-    item_scopes: AHashMap<ItemId, ScopeId>,
-    expr_scopes: AHashMap<ExprId, ScopeId>,
+    pub scopes: AHashMap<ScopeId, Scope>,
 }
 
 impl SymbolTable {
     fn new() -> Self {
         Self {
-            scopes: vec![],
-            item_scopes: AHashMap::new(),
-            expr_scopes: AHashMap::new(),
+            scopes: AHashMap::new(),
         }
     }
 
-    fn new_item_scope(
-        &mut self,
-        kind: ScopeKind,
-        item_id: ItemId,
-        parent: Option<ScopeId>,
-    ) -> ScopeId {
-        let new_id = self.scopes.len();
-
-        self.scopes.push(Scope::new(new_id, parent, kind));
-        self.item_scopes.insert(item_id, new_id);
-
-        new_id
+    fn new_scope(&mut self, id: ScopeId, kind: ScopeKind, parent: Option<ScopeId>) {
+        self.scopes.insert(id, Scope::new(kind, parent));
     }
 
-    fn new_expr_scope(
-        &mut self,
-        kind: ScopeKind,
-        expr_id: ExprId,
-        parent: Option<ScopeId>,
-    ) -> ScopeId {
-        let new_id = self.scopes.len();
-
-        self.scopes.push(Scope::new(new_id, parent, kind));
-        self.expr_scopes.insert(expr_id, new_id);
-
-        new_id
-    }
-
-    /// Look up a symbol in the local scope only
     pub fn lookup_local(&self, name: Ident, scope_id: ScopeId) -> Option<&Symbol> {
-        self.scopes[scope_id].symbols.get(&name)
+        self.scopes[&scope_id].symbols.get(&name)
     }
 
-    /// Look up a symbol by name, searching current scope and all parent scopes
-    /// Returns the symbol and the scope it was found in
     pub fn lookup(&self, name: Ident, mut scope_id: ScopeId) -> Option<(&Symbol, ScopeId)> {
         loop {
-            let scope = &self.scopes[scope_id];
-
+            let scope = &self.scopes[&scope_id];
             if let Some(symbol) = scope.symbols.get(&name) {
                 return Some((symbol, scope_id));
             }
-
             scope_id = scope.parent?;
         }
-    }
-
-    /// Get mutable reference to a symbol by looking up the scope chain
-    pub fn lookup_mut(
-        &mut self,
-        name: Ident,
-        mut scope_id: ScopeId,
-    ) -> Option<(&mut Symbol, ScopeId)> {
-        let target_scope = loop {
-            let scope = &self.scopes[scope_id];
-
-            if scope.symbols.get(&name).is_some() {
-                break scope_id;
-            }
-
-            scope_id = scope.parent?;
-        };
-
-        Some((
-            self.scopes[target_scope].symbols.get_mut(&name).unwrap(),
-            target_scope,
-        ))
     }
 
     fn define(&mut self, symbol: Symbol, in_scope_id: ScopeId) -> Result<(), (Symbol, Span)> {
-        self.scopes[in_scope_id].define(symbol)
+        self.scopes
+            .get_mut(&in_scope_id)
+            .expect("scope not found")
+            .define(symbol)
     }
 
-    /// Find the nearest enclosing loop scope (for break/continue validation)
     pub fn find_loop_scope(&self, mut scope_id: ScopeId) -> Option<ScopeId> {
         loop {
-            let scope = &self.scopes[scope_id];
-
+            let scope = &self.scopes[&scope_id];
             if scope.kind == ScopeKind::Loop {
                 return Some(scope_id);
             }
-
             scope_id = scope.parent?;
         }
     }
 
-    /// Find the nearest enclosing function scope
     pub fn find_function_scope(&self, mut scope_id: ScopeId) -> Option<ScopeId> {
         loop {
-            let scope = &self.scopes[scope_id];
-
+            let scope = &self.scopes[&scope_id];
             if scope.kind == ScopeKind::Function {
                 return Some(scope_id);
             }
-
             scope_id = scope.parent?;
         }
     }
 }
 
 struct NameResolver<'a> {
-    ast: &'a AstArena,
+    ast: &'a CanonAstArena,
     interner: &'a mut Interner,
-    symbol_table: SymbolTable,
+    table: SymbolTable,
     errors: Vec<ResolveError>,
 }
 
 impl<'a> NameResolver<'a> {
-    pub fn new(ast: &'a AstArena, interner: &'a mut Interner) -> Self {
+    pub fn new(ast: &'a CanonAstArena, interner: &'a mut Interner) -> Self {
         Self {
             ast,
             interner,
-            symbol_table: SymbolTable::new(),
+            table: SymbolTable::new(),
             errors: vec![],
         }
     }
@@ -206,418 +166,120 @@ impl<'a> NameResolver<'a> {
         self.errors.push(err);
     }
 
-    fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
-    }
+    pub fn resolve(mut self, root_decl: DeclId) -> (SymbolTable, Vec<ResolveError>) {
+        let scope_id = ScopeId::Decl(root_decl);
 
-    pub fn resolve(mut self, root_id: ItemId) -> (SymbolTable, Vec<ResolveError>) {
-        // register root
-        let root_scope_id = self.symbol_table.scopes.len();
-        let root_item = &self.ast.items[root_id];
+        self.table.new_scope(scope_id, ScopeKind::Global, None);
 
-        self.symbol_table
-            .new_item_scope(ScopeKind::Global, root_id, None);
+        if let DeclKind::Const { value, .. } = &self.ast.decls[root_decl].kind {
+            if let ExprKind::ModuleType { decls } = &self.ast.exprs[*value].kind {
+                // First pass: register all declarations
+                for &decl_id in decls {
+                    self.register_decl(decl_id, scope_id);
+                }
 
-        if let ItemKind::Module { items } = &root_item.kind {
-            // First pass: register items
-            for item in items {
-                self.register_item(*item, root_scope_id);
-            }
+                // Second pass: resolve all declarations
+                for &decl_id in decls {
+                    self.resolve_decl(decl_id, scope_id);
+                }
 
-            for item in items {
-                self.resolve_item(*item, root_scope_id);
+                return (self.table, self.errors);
             }
         }
 
-        (self.symbol_table, self.errors)
+        self.error(ResolveError::RootNotModule);
+        (self.table, self.errors)
     }
 
-    fn register_item(&mut self, item_id: ItemId, in_scope_id: ScopeId) {
-        let item = &self.ast.items[item_id];
+    fn register_decl(&mut self, decl_id: DeclId, in_scope_id: ScopeId) {
+        let decl = &self.ast.decls[decl_id];
 
-        match &item.kind {
-            ItemKind::Module { items } => {
-                // Register module in current scope
-                let symbol = Symbol {
-                    name: item.name,
-                    kind: SymbolKind::Module,
-                    span: item.span,
-                };
+        let symbol = Symbol {
+            id: SymbolId::Decl(decl_id),
+            name: decl.name,
+            span: decl.span,
+        };
 
-                if let Err((dupe, first_def)) = self.symbol_table.define(symbol, in_scope_id) {
-                    self.errors.push(ResolveError::DuplicateSymbol {
-                        name: item.name,
-                        first_def,
-                        dupe_def: dupe.span,
-                    });
-                }
+        if let Err((dupe, first_def)) = self.table.define(symbol, in_scope_id) {
+            self.error(ResolveError::DuplicateSymbol {
+                name: decl.name,
+                first_def,
+                dupe_def: dupe.span,
+            });
+        }
 
-                // Create module scope and register its items
-                let mod_scope_id =
-                    self.symbol_table
-                        .new_item_scope(ScopeKind::Module, item_id, Some(in_scope_id));
-
-                for &child_item in items {
-                    self.register_item(child_item, mod_scope_id);
-                }
-            }
-            ItemKind::Function { .. } => {
-                let symbol = Symbol {
-                    name: item.name,
-                    kind: SymbolKind::Function,
-                    span: item.span,
-                };
-
-                if let Err((dupe, first_def)) = self.symbol_table.define(symbol, in_scope_id) {
-                    self.errors.push(ResolveError::DuplicateSymbol {
-                        name: item.name,
-                        first_def,
-                        dupe_def: dupe.span,
-                    });
-                }
-
-                self.symbol_table
-                    .new_item_scope(ScopeKind::Function, item_id, Some(in_scope_id));
-            }
-            ItemKind::DataType {
-                fields,
-                generics,
-                methods,
-                ..
-            } => {
-                let kind =
-                    tnr! {generics.is_empty() => SymbolKind::Variable : SymbolKind::Function};
-
-                let symbol = Symbol {
-                    name: item.name,
-                    kind,
-                    span: item.span,
-                };
-
-                if let Err((dupe, first_def)) = self.symbol_table.define(symbol, in_scope_id) {
-                    self.error(ResolveError::DuplicateSymbol {
-                        name: item.name,
-                        first_def,
-                        dupe_def: dupe.span,
-                    });
-                }
-
-                use std::collections::hash_map::Entry;
-                let mut seen = AHashMap::new();
-                for field in fields {
-                    match seen.entry(field.name) {
-                        Entry::Occupied(entry) => self.error(ResolveError::DuplicateField {
-                            item_name: item.name,
-                            field_name: field.name,
-                            first_def: *entry.get(),
-                            dupe_def: field.span,
-                        }),
-                        Entry::Vacant(entry) => {
-                            entry.insert(field.span);
-                        }
-                    }
-                }
-
-                let type_scope_id = self.symbol_table.new_item_scope(
-                    ScopeKind::DataType,
-                    item_id,
+        match &decl.kind {
+            DeclKind::Const { .. } => {}
+            DeclKind::Function { .. } => {
+                self.table.new_scope(
+                    ScopeId::Decl(decl_id),
+                    ScopeKind::Function,
                     Some(in_scope_id),
                 );
-
-                for &method_id in methods {
-                    self.register_item(method_id, type_scope_id);
-                }
-            }
-            ItemKind::Const { generics, .. } => {
-                let kind =
-                    tnr! {generics.is_empty() => SymbolKind::Variable : SymbolKind::Function};
-
-                let symbol = Symbol {
-                    name: item.name,
-                    kind,
-                    span: item.span,
-                };
-
-                if let Err((dupe, first_def)) = self.symbol_table.scopes[in_scope_id].define(symbol)
-                {
-                    self.error(ResolveError::DuplicateSymbol {
-                        name: item.name,
-                        first_def,
-                        dupe_def: dupe.span,
-                    });
-                }
-
-                if kind == SymbolKind::Function {
-                    self.symbol_table.new_item_scope(
-                        ScopeKind::Function,
-                        item_id,
-                        Some(in_scope_id),
-                    );
-                }
             }
         }
     }
 
-    fn resolve_item(&mut self, item_id: ItemId, in_scope_id: ScopeId) {
-        let item = &self.ast.items[item_id];
-        match &item.kind {
-            ItemKind::Module { items } => {
-                let mod_scope_id = self.symbol_table.item_scopes[&item_id];
+    fn resolve_decl(&mut self, decl_id: DeclId, in_scope_id: ScopeId) {
+        let decl = &self.ast.decls[decl_id];
 
-                for &child_item in items {
-                    self.resolve_item(child_item, mod_scope_id);
+        match &decl.kind {
+            DeclKind::Const { ty, value } => {
+                if let Some(ty_expr) = ty {
+                    self.resolve_expr(*ty_expr, in_scope_id);
                 }
+                self.resolve_expr(*value, in_scope_id);
             }
-            ItemKind::Function {
-                generics,
-                params,
-                ret,
-                body,
-                ..
+
+            DeclKind::Function {
+                params, ret, body, ..
             } => {
-                let func_scope_id = self.symbol_table.item_scopes[&item_id];
+                let func_scope_id = ScopeId::Decl(decl_id);
 
-                // Add generics as variables
-                for generic in &generics.params {
-                    let symbol = Symbol {
-                        name: generic.name,
-                        kind: SymbolKind::Variable,
-                        span: generic.span,
-                    };
-
-                    if let Err((dupe, first_def)) = self.symbol_table.define(symbol, func_scope_id)
-                    {
-                        self.error(ResolveError::DuplicateSymbol {
-                            name: generic.name,
-                            first_def,
-                            dupe_def: dupe.span,
-                        });
-                    }
-                }
-
-                //Resolve generic types (T: type, N: int, etc.)
-                for generic in &generics.params {
-                    self.resolve_type(generic.ty, func_scope_id);
-                }
-
+                // Add comptime parameters first
                 for param in params {
-                    let symbol = Symbol {
-                        name: param.name,
-                        kind: SymbolKind::Variable,
-                        span: param.span,
-                    };
-
-                    if let Err((dupe, first_def)) = self.symbol_table.define(symbol, func_scope_id)
-                    {
-                        self.error(ResolveError::DuplicateSymbol {
-                            name: param.name,
-                            first_def,
-                            dupe_def: dupe.span,
-                        });
-                    }
-                }
-
-                // Resolve param types (can reference generics)
-                for param in params {
-                    self.resolve_type(param.ty, func_scope_id);
-                }
-
-                // Resolve param types
-                self.resolve_type(*ret, func_scope_id);
-
-                // Resolve body
-                self.resolve_expr(*body, func_scope_id);
-            }
-            ItemKind::DataType {
-                generics,
-                fields,
-                methods,
-                ..
-            } => {
-                let type_scope_id = self.symbol_table.item_scopes[&item_id];
-
-                // Add generics as variables
-                for generic in &generics.params {
-                    let symbol = Symbol {
-                        name: generic.name,
-                        kind: SymbolKind::Variable,
-                        span: generic.span,
-                    };
-
-                    if let Err((dupe, first_def)) = self.symbol_table.define(symbol, type_scope_id)
-                    {
-                        self.error(ResolveError::DuplicateSymbol {
-                            name: generic.name,
-                            first_def,
-                            dupe_def: dupe.span,
-                        });
-                    }
-                }
-
-                // Resolve generic types
-                for generic in &generics.params {
-                    self.resolve_type(generic.ty, type_scope_id);
-                }
-
-                // Resolve field types (can reference generics)
-                for field in fields {
-                    self.resolve_type(field.ty, type_scope_id);
-                }
-
-                // Resolve methods (can reference generics)
-                for &method_id in methods {
-                    self.resolve_item(method_id, type_scope_id);
-                }
-            }
-
-            ItemKind::Const {
-                generics,
-                ty,
-                value,
-            } => {
-                if generics.is_empty() {
-                    // Non-generic const - resolve in parent scope
-                    if let Some(ty_id) = ty {
-                        self.resolve_type(*ty_id, in_scope_id);
-                    }
-                    self.resolve_expr(*value, in_scope_id);
-                } else {
-                    let const_scope_id = self.symbol_table.item_scopes[&item_id];
-
-                    // Add generics as variables
-                    for generic in &generics.params {
+                    if param.is_comptime {
                         let symbol = Symbol {
-                            name: generic.name,
-                            kind: SymbolKind::Variable,
-                            span: generic.span,
+                            id: SymbolId::None,
+                            name: param.name,
+                            span: param.span,
                         };
 
-                        if let Err((dupe, first_def)) =
-                            self.symbol_table.scopes[const_scope_id].define(symbol)
-                        {
+                        if let Err((dupe, first_def)) = self.table.define(symbol, func_scope_id) {
                             self.error(ResolveError::DuplicateSymbol {
-                                name: generic.name,
+                                name: param.name,
                                 first_def,
                                 dupe_def: dupe.span,
                             });
                         }
+
+                        self.resolve_expr(param.ty, func_scope_id);
                     }
-
-                    // Resolve generic types
-                    for generic in &generics.params {
-                        self.resolve_type(generic.ty, const_scope_id);
-                    }
-
-                    // Resolve type and value with generics in scope
-                    if let Some(ty_id) = ty {
-                        self.resolve_type(*ty_id, const_scope_id);
-                    }
-                    self.resolve_expr(*value, const_scope_id);
-                };
-            }
-        }
-    }
-
-    fn resolve_type(&mut self, type_id: TypeId, in_scope_id: ScopeId) {
-        let ty = &self.ast.types[type_id];
-
-        match &ty.kind {
-            TypeKind::Any
-            | TypeKind::Int
-            | TypeKind::Float
-            | TypeKind::Bool
-            | TypeKind::String
-            | TypeKind::Char
-            | TypeKind::Void
-            | TypeKind::Never
-            | TypeKind::Type
-            | TypeKind::Infer => {}
-
-            TypeKind::Path(path_id) => self.resolve_path(*path_id, in_scope_id),
-
-            TypeKind::Optional(inner) => self.resolve_type(*inner, in_scope_id),
-
-            TypeKind::DynArray(element) => self.resolve_type(*element, in_scope_id),
-
-            // Array - resolve element type and length expression
-            TypeKind::Array { element, len } => {
-                self.resolve_type(*element, in_scope_id);
-                self.resolve_expr(*len, in_scope_id);
-            }
-
-            TypeKind::Pointer { pointee, .. } => self.resolve_type(*pointee, in_scope_id),
-
-            TypeKind::Function { params, ret } => {
-                for param_ty in params {
-                    self.resolve_type(*param_ty, in_scope_id);
                 }
-                self.resolve_type(*ret, in_scope_id);
-            }
 
-            TypeKind::AnonStruct { fields, methods } => {
-                let struct_name = self.interner.get_or_intern_static("<anonymous>");
+                // Add regular parameters
+                for param in params {
+                    if !param.is_comptime {
+                        let symbol = Symbol {
+                            id: SymbolId::None,
+                            name: param.name,
+                            span: param.span,
+                        };
 
-                let mut seen = AHashMap::new();
-                for field in fields {
-                    match seen.entry(field.name) {
-                        Entry::Occupied(entry) => self.error(ResolveError::DuplicateField {
-                            item_name: struct_name,
-                            field_name: field.name,
-                            first_def: *entry.get(),
-                            dupe_def: field.span,
-                        }),
-                        Entry::Vacant(entry) => {
-                            entry.insert(field.span);
+                        if let Err((dupe, first_def)) = self.table.define(symbol, func_scope_id) {
+                            self.error(ResolveError::DuplicateSymbol {
+                                name: param.name,
+                                first_def,
+                                dupe_def: dupe.span,
+                            });
                         }
+
+                        self.resolve_expr(param.ty, func_scope_id);
                     }
                 }
 
-                for field in fields {
-                    self.resolve_type(field.ty, in_scope_id);
-                }
-
-                for &method_id in methods {
-                    self.resolve_item(method_id, in_scope_id);
-                }
-            }
-
-            TypeKind::Tuple { fields } => {
-                for field_ty in fields {
-                    self.resolve_type(*field_ty, in_scope_id);
-                }
-            }
-
-            TypeKind::AnonEnum { variants, methods } => {
-                let struct_name = self.interner.get_or_intern_static("<anonymous>");
-
-                let mut seen = AHashMap::new();
-
-                for variant in variants {
-                    match seen.entry(variant.name) {
-                        Entry::Occupied(entry) => self.error(ResolveError::DuplicateField {
-                            item_name: struct_name,
-                            field_name: variant.name,
-                            first_def: *entry.get(),
-                            dupe_def: variant.span,
-                        }),
-                        Entry::Vacant(entry) => {
-                            entry.insert(variant.span);
-                        }
-                    }
-                }
-
-                for variant in variants {
-                    self.resolve_type(variant.ty, in_scope_id);
-                }
-
-                for &method_id in methods {
-                    self.resolve_item(method_id, in_scope_id);
-                }
-            }
-
-            // Range - resolve element type
-            TypeKind::Range { element, .. } => {
-                self.resolve_type(*element, in_scope_id);
+                self.resolve_expr(*ret, func_scope_id);
+                self.resolve_expr(*body, func_scope_id);
             }
         }
     }
@@ -627,6 +289,7 @@ impl<'a> NameResolver<'a> {
 
         match &expr.kind {
             ExprKind::Int(_)
+            | ExprKind::Uint(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::CStr(_)
@@ -634,26 +297,8 @@ impl<'a> NameResolver<'a> {
             | ExprKind::Null
             | ExprKind::Void => {}
 
-            ExprKind::TypeLit(ty) => {
-                self.resolve_type(*ty, in_scope_id);
-            }
-
             ExprKind::Ident(name) => {
-                if let Some((symbol, _)) = self.symbol_table.lookup(*name, in_scope_id) {
-                    // Check if it's a valid symbol for expression context
-                    match symbol.kind {
-                        SymbolKind::Variable | SymbolKind::Function => {
-                            // Valid in expression
-                        }
-                        SymbolKind::Module => {
-                            self.error(ResolveError::InvalidSymbolInExpression {
-                                name: *name,
-                                span: expr.span,
-                                kind: symbol.kind,
-                            });
-                        }
-                    }
-                } else {
+                if self.table.lookup(*name, in_scope_id).is_none() {
                     self.error(ResolveError::UndefinedSymbol {
                         name: *name,
                         use_span: expr.span,
@@ -661,8 +306,8 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
-            ExprKind::Path(path_id) => {
-                self.resolve_path(*path_id, in_scope_id);
+            ExprKind::Group(inner) => {
+                self.resolve_expr(*inner, in_scope_id);
             }
 
             ExprKind::ArrayLit(elements) => {
@@ -671,14 +316,14 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
-            ExprKind::ArrayRepeat { value, count } => {
+            ExprKind::ArrayRep { value, count } => {
                 self.resolve_expr(*value, in_scope_id);
                 self.resolve_expr(*count, in_scope_id);
             }
 
-            ExprKind::StructLit { path, fields } => {
-                if let Some(path_id) = path {
-                    self.resolve_path(*path_id, in_scope_id);
+            ExprKind::StructLit { ty: path, fields } => {
+                if let Some(path_expr) = path {
+                    self.resolve_expr(*path_expr, in_scope_id);
                 }
 
                 for field in fields {
@@ -688,24 +333,16 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
-            ExprKind::EnumLit { path, field } => {
-                if let Some(path_id) = path {
-                    self.resolve_path(*path_id, in_scope_id);
-                }
-
-                if let Some(value_expr) = field.value {
-                    self.resolve_expr(value_expr, in_scope_id);
+            ExprKind::EnumLit { ty: path, .. } => {
+                if let Some(path_expr) = path {
+                    self.resolve_expr(*path_expr, in_scope_id);
                 }
             }
 
             ExprKind::TupleLit { fields } => {
                 for field in fields {
-                    self.resolve_expr(field, in_scope_id);
+                    self.resolve_expr(*field, in_scope_id);
                 }
-            }
-
-            ExprKind::Group(inner) => {
-                self.resolve_expr(*inner, in_scope_id);
             }
 
             ExprKind::Unary { expr, .. } => {
@@ -717,18 +354,14 @@ impl<'a> NameResolver<'a> {
                 self.resolve_expr(*rhs, in_scope_id);
             }
 
-            ExprKind::Assign { target, value, .. } => {
-                self.resolve_expr(*target, in_scope_id);
-                self.resolve_expr(*value, in_scope_id);
+            ExprKind::Assign { tgt, val, .. } => {
+                self.resolve_expr(*tgt, in_scope_id);
+                self.resolve_expr(*val, in_scope_id);
             }
 
-            ExprKind::Range { start, end, .. } => {
-                if let Some(start_expr) = start {
-                    self.resolve_expr(*start_expr, in_scope_id);
-                }
-                if let Some(end_expr) = end {
-                    self.resolve_expr(*end_expr, in_scope_id);
-                }
+            ExprKind::Cast { expr, ty } => {
+                self.resolve_expr(*expr, in_scope_id);
+                self.resolve_expr(*ty, in_scope_id);
             }
 
             ExprKind::If {
@@ -743,76 +376,89 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
-            ExprKind::Block(stmts) => {
-                // Create block scope
-                let block_scope_id =
-                    self.symbol_table
-                        .new_expr_scope(ScopeKind::Block, expr_id, Some(in_scope_id));
+            ExprKind::Match { expr, arms } => {
+                self.resolve_expr(*expr, in_scope_id);
 
-                // Resolve statements in block scope
-                for &stmt_id in stmts {
-                    self.resolve_stmt(stmt_id, block_scope_id);
+                for arm in arms {
+                    self.resolve_pattern(arm.pattern, in_scope_id);
+
+                    if let Some(guard_expr) = arm.guard {
+                        self.resolve_expr(guard_expr, in_scope_id);
+                    }
+
+                    self.resolve_expr(arm.body, in_scope_id);
                 }
             }
 
             ExprKind::While { cond, body } => {
                 self.resolve_expr(*cond, in_scope_id);
 
-                // Create loop scope for body
-                let loop_scope_id =
-                    self.symbol_table
-                        .new_expr_scope(ScopeKind::Loop, expr_id, Some(in_scope_id));
+                let loop_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(loop_scope_id, ScopeKind::Loop, Some(in_scope_id));
 
                 self.resolve_expr(*body, loop_scope_id);
             }
 
             ExprKind::Loop(body) => {
-                // Create loop scope
-                let loop_scope_id =
-                    self.symbol_table
-                        .new_expr_scope(ScopeKind::Loop, expr_id, Some(in_scope_id));
+                let loop_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(loop_scope_id, ScopeKind::Loop, Some(in_scope_id));
 
                 self.resolve_expr(*body, loop_scope_id);
             }
 
-            ExprKind::Match { expr, arms } => {
-                self.resolve_expr(*expr, in_scope_id);
+            ExprKind::For {
+                pattern,
+                iter,
+                body,
+            } => {
+                self.resolve_expr(*iter, in_scope_id);
 
-                for arm in arms {
-                    // Resolve pattern
-                    self.resolve_pattern(arm.pattern, in_scope_id);
+                let loop_scope_id = ScopeId::Expr(expr_id);
 
-                    // Resolve guard if present
-                    if let Some(guard_expr) = arm.guard {
-                        self.resolve_expr(guard_expr, in_scope_id);
-                    }
+                self.table
+                    .new_scope(loop_scope_id, ScopeKind::Loop, Some(in_scope_id));
 
-                    // Resolve body
-                    self.resolve_expr(arm.body, in_scope_id);
+                self.resolve_pattern(*pattern, loop_scope_id);
+                self.add_pattern_bindings(*pattern, loop_scope_id);
+
+                self.resolve_expr(*body, loop_scope_id);
+            }
+
+            ExprKind::Block(stmts) => {
+                let block_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(block_scope_id, ScopeKind::Loop, Some(in_scope_id));
+
+                for &stmt_id in stmts {
+                    self.resolve_stmt(stmt_id, block_scope_id);
                 }
             }
 
             ExprKind::Return(value) => {
                 self.resolve_expr(*value, in_scope_id);
 
-                // Check we're inside a function
-                if self.symbol_table.find_function_scope(in_scope_id).is_none() {
+                if self.table.find_function_scope(in_scope_id).is_none() {
                     self.error(ResolveError::ReturnOutsideFunction { span: expr.span });
                 }
             }
 
             ExprKind::Break(value) => {
-                self.resolve_expr(*value, in_scope_id);
+                if let Some(val_expr) = value {
+                    self.resolve_expr(*val_expr, in_scope_id);
+                }
 
-                // Check we're inside a loop
-                if self.symbol_table.find_loop_scope(in_scope_id).is_none() {
+                if self.table.find_loop_scope(in_scope_id).is_none() {
                     self.error(ResolveError::BreakOutsideLoop { span: expr.span });
                 }
             }
 
             ExprKind::Continue => {
-                // Check we're inside a loop
-                if self.symbol_table.find_loop_scope(in_scope_id).is_none() {
+                if self.table.find_loop_scope(in_scope_id).is_none() {
                     self.error(ResolveError::ContinueOutsideLoop { span: expr.span });
                 }
             }
@@ -829,41 +475,134 @@ impl<'a> NameResolver<'a> {
                 self.resolve_expr(*object, in_scope_id);
             }
 
-            ExprKind::Index { object, index } => {
+            ExprKind::ScopeAccess { object, .. } => {
                 self.resolve_expr(*object, in_scope_id);
-                self.resolve_expr(*index, in_scope_id);
             }
 
-            ExprKind::Cast { expr, ty } => {
-                self.resolve_expr(*expr, in_scope_id);
-                self.resolve_type(*ty, in_scope_id);
+            ExprKind::OptionalField { object, .. } => {
+                self.resolve_expr(*object, in_scope_id);
+            }
+
+            ExprKind::Index { obj, idx } => {
+                self.resolve_expr(*obj, in_scope_id);
+                self.resolve_expr(*idx, in_scope_id);
+            }
+
+            ExprKind::Range { start, end, .. } => {
+                if let Some(start_expr) = start {
+                    self.resolve_expr(*start_expr, in_scope_id);
+                }
+                if let Some(end_expr) = end {
+                    self.resolve_expr(*end_expr, in_scope_id);
+                }
+            }
+
+            ExprKind::Unwrap(inner) => {
+                self.resolve_expr(*inner, in_scope_id);
             }
 
             ExprKind::Comptime(inner) => {
                 self.resolve_expr(*inner, in_scope_id);
             }
-        }
-    }
 
-    fn resolve_path(&mut self, path_id: PathId, in_scope_id: ScopeId) {
-        let path = &self.ast.paths[path_id];
+            ExprKind::StructType { fields, decls } => {
+                let struct_scope_id = ScopeId::Expr(expr_id);
 
-        // For now, handle simple single-segment paths (just an identifier)
-        // TODO: Handle multi-segment paths like std::vec::Vec
+                self.table
+                    .new_scope(struct_scope_id, ScopeKind::Type, Some(in_scope_id));
 
-        if path.segments.len() == 1 {
-            let ident = path.segments[0].ident;
+                for field in fields {
+                    self.resolve_expr(field.ty, in_scope_id);
+                }
 
-            // Look up in symbol table
-            if self.symbol_table.lookup(ident, in_scope_id).is_none() {
-                self.error(ResolveError::UndefinedSymbol {
-                    name: ident,
-                    use_span: path.span,
-                });
+                for &decl_id in decls {
+                    self.register_decl(decl_id, struct_scope_id);
+                }
+                for &decl_id in decls {
+                    self.resolve_decl(decl_id, struct_scope_id);
+                }
             }
-        } else {
-            // Multi-segment path - TODO
-            todo!("resolve multi-segment paths");
+
+            ExprKind::UnionType { fields, decls } => {
+                let union_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(union_scope_id, ScopeKind::Type, Some(in_scope_id));
+
+                for field in fields {
+                    self.resolve_expr(field.ty, in_scope_id);
+                }
+
+                for &decl_id in decls {
+                    self.register_decl(decl_id, union_scope_id);
+                }
+                for &decl_id in decls {
+                    self.resolve_decl(decl_id, union_scope_id);
+                }
+            }
+
+            ExprKind::EnumType { variants, decls } => {
+                let enum_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(enum_scope_id, ScopeKind::Type, Some(in_scope_id));
+
+                for variant in variants {
+                    if let Some(value_expr) = variant.value {
+                        self.resolve_expr(value_expr, in_scope_id);
+                    }
+                }
+
+                for &decl_id in decls {
+                    self.register_decl(decl_id, enum_scope_id);
+                }
+
+                for &decl_id in decls {
+                    self.resolve_decl(decl_id, enum_scope_id);
+                }
+            }
+
+            ExprKind::TupleType { fields } => {
+                for field in fields {
+                    self.resolve_expr(*field, in_scope_id);
+                }
+            }
+
+            ExprKind::ArrayType { elem_ty, len } => {
+                self.resolve_expr(*elem_ty, in_scope_id);
+                self.resolve_expr(*len, in_scope_id);
+            }
+
+            ExprKind::PointerType { pointee, .. } => {
+                self.resolve_expr(*pointee, in_scope_id);
+            }
+
+            ExprKind::OptionalType(inner) => {
+                self.resolve_expr(*inner, in_scope_id);
+            }
+
+            ExprKind::ModuleType { decls } => {
+                let mod_scope_id = ScopeId::Expr(expr_id);
+
+                self.table
+                    .new_scope(mod_scope_id, ScopeKind::Type, Some(in_scope_id));
+
+                for &decl_id in decls {
+                    self.register_decl(decl_id, mod_scope_id);
+                }
+
+                for &decl_id in decls {
+                    self.resolve_decl(decl_id, mod_scope_id);
+                }
+            }
+
+            ExprKind::FnType { params, ret } => {
+                for (_, param_ty) in params {
+                    self.resolve_expr(*param_ty, in_scope_id);
+                }
+
+                self.resolve_expr(*ret, in_scope_id);
+            }
         }
     }
 
@@ -871,103 +610,76 @@ impl<'a> NameResolver<'a> {
         let stmt = &self.ast.stmts[stmt_id];
 
         match &stmt.kind {
-            // Empty statement
             StmtKind::Semi => {}
 
-            // Variable declaration
             StmtKind::VarDecl {
-                mutable,
-                pattern,
-                ty,
-                value,
-            } => {
-                // Resolve type annotation if present
-                if let Some(ty_id) = ty {
-                    self.resolve_type(*ty_id, in_scope_id);
-                }
-
-                // Resolve value expression
-                self.resolve_expr(*value, in_scope_id);
-
-                // Add bindings from pattern to scope
-                self.add_pattern_bindings(*pattern, in_scope_id);
-            }
-
-            // Comptime variable declaration
-            StmtKind::ConstVarDecl {
                 pattern, ty, value, ..
             } => {
-                if let Some(ty_id) = ty {
-                    self.resolve_type(*ty_id, in_scope_id);
+                if let Some(ty_expr) = ty {
+                    self.resolve_expr(*ty_expr, in_scope_id);
                 }
 
-                // Resolve value expression
                 self.resolve_expr(*value, in_scope_id);
 
-                // Add bindings from pattern to scope
                 self.add_pattern_bindings(*pattern, in_scope_id);
             }
 
-            // Expression statement
             StmtKind::Expr { expr, .. } => {
                 self.resolve_expr(*expr, in_scope_id);
             }
         }
     }
+
     fn resolve_pattern(&mut self, pattern_id: PatternId, in_scope_id: ScopeId) {
         let pattern = &self.ast.patterns[pattern_id];
 
         match &pattern.kind {
-            // Wildcard - nothing to resolve
-            PatternKind::Wildcard => {}
+            PatternKind::Wildcard | PatternKind::Variable { .. } => {}
 
-            // Variable binding - nothing to resolve (just a name)
-            PatternKind::Variable { .. } => {}
+            PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::Bool(_)
+            | PatternKind::Char(_)
+            | PatternKind::String(_) => {}
 
-            // Path pattern - resolve the path
-            PatternKind::Path(path_id) => {
-                self.resolve_path(*path_id, in_scope_id);
-            }
-
-            // Struct destructuring
             PatternKind::Struct { path, fields } => {
-                if let Some(path_id) = path {
-                    self.resolve_path(*path_id, in_scope_id);
+                if let Some(path_expr) = path {
+                    self.resolve_expr(*path_expr, in_scope_id);
                 }
 
-                // Resolve nested patterns
                 for field in fields {
                     self.resolve_pattern(field.pattern, in_scope_id);
                 }
             }
 
-            // Tuple destructuring
             PatternKind::Tuple { elements } => {
                 for &elem in elements {
                     self.resolve_pattern(elem, in_scope_id);
                 }
             }
 
-            // Enum destructuring
-            PatternKind::Enum { path, pattern } => {
-                if let Some(path_id) = path {
-                    self.resolve_path(*path_id, in_scope_id);
-                }
-
-                if let Some(pat_id) = pattern {
-                    self.resolve_pattern(*pat_id, in_scope_id);
+            PatternKind::Enum { path, .. } => {
+                if let Some(path_expr) = path {
+                    self.resolve_expr(*path_expr, in_scope_id);
                 }
             }
 
-            // Literal patterns
             PatternKind::Lit(expr_id) => {
                 self.resolve_expr(*expr_id, in_scope_id);
             }
 
-            // Or pattern
             PatternKind::Or(patterns) => {
                 for &pat in patterns {
                     self.resolve_pattern(pat, in_scope_id);
+                }
+            }
+
+            PatternKind::Range { start, end, .. } => {
+                if let Some(start_expr) = start {
+                    self.resolve_expr(*start_expr, in_scope_id);
+                }
+                if let Some(end_expr) = end {
+                    self.resolve_expr(*end_expr, in_scope_id);
                 }
             }
         }
@@ -977,19 +689,16 @@ impl<'a> NameResolver<'a> {
         let pattern = &self.ast.patterns[pattern_id];
 
         match &pattern.kind {
-            // Wildcard - no binding
             PatternKind::Wildcard => {}
 
-            // Variable binding - add to scope
             PatternKind::Variable { name, .. } => {
                 let symbol = Symbol {
+                    id: SymbolId::None,
                     name: *name,
-                    kind: SymbolKind::Variable,
                     span: pattern.span,
                 };
 
-                if let Err((dupe, first_def)) = self.symbol_table.scopes[in_scope_id].define(symbol)
-                {
+                if let Err((dupe, first_def)) = self.table.define(symbol, in_scope_id) {
                     self.error(ResolveError::DuplicateSymbol {
                         name: *name,
                         first_def,
@@ -998,99 +707,25 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
-            // Path - no new bindings
-            PatternKind::Path(_) => {}
-
-            // Struct - recursively add bindings from fields
             PatternKind::Struct { fields, .. } => {
                 for field in fields {
                     self.add_pattern_bindings(field.pattern, in_scope_id);
                 }
             }
 
-            // Tuple - recursively add bindings from elements
             PatternKind::Tuple { elements } => {
                 for &elem in elements {
                     self.add_pattern_bindings(elem, in_scope_id);
                 }
             }
 
-            // Enum - recursively add bindings from nested pattern
-            PatternKind::Enum { pattern, .. } => {
-                if let Some(pat_id) = pattern {
-                    self.add_pattern_bindings(*pat_id, in_scope_id);
-                }
-            }
-
-            // Literal - no bindings
-            PatternKind::Lit(_) => {}
-
-            // Or - add bindings from all alternatives (they must be the same)
             PatternKind::Or(patterns) => {
-                // For now, just add from first pattern
-                // Type checker should verify all alternatives bind same names
                 if let Some(&first) = patterns.first() {
                     self.add_pattern_bindings(first, in_scope_id);
                 }
             }
+
+            _ => {}
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum ResolveError {
-    /// Symbol is defined multiple times in the same scope
-    DuplicateSymbol {
-        name: Ident,
-        first_def: Span,
-        dupe_def: Span,
-    },
-    DuplicateField {
-        item_name: Ident,
-        field_name: Ident,
-        first_def: Span,
-        dupe_def: Span,
-    },
-    /// Symbol is not found in any scope
-    UndefinedSymbol {
-        name: Ident,
-        use_span: Span,
-    },
-
-    /// Variable used before initialization
-    UninitVariable {
-        name: Ident,
-        use_span: Span,
-        def_span: Span,
-    },
-
-    /// break used outside of a loop
-    BreakOutsideLoop {
-        span: Span,
-    },
-
-    /// continue used outside of a loop
-    ContinueOutsideLoop {
-        span: Span,
-    },
-
-    /// return used outside of a function
-    ReturnOutsideFunction {
-        span: Span,
-    },
-
-    InvalidSymbolInExpression {
-        name: Ident,
-        span: Span,
-        kind: SymbolKind,
-    },
-
-    TypeNotFound {
-        name: Ident,
-        use_span: Span,
-    },
-    Internal {
-        msg: String,
-        span: Span,
-    },
 }

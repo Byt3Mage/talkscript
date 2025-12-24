@@ -192,11 +192,21 @@ impl<'a> Lexer<'a> {
     }
 
     fn make_minus(&mut self, start_byte: usize) -> Token<'a> {
-        self.advance(); // Consume '='
+        self.advance(); // Consume '-'
 
         match self.current {
             Some((_, '=')) => self.make_single(tt![-=], start_byte),
             Some((_, '>')) => self.make_single(tt![->], start_byte),
+            _ => self.make_token(tt![-], start_byte, &self.input[start_byte..start_byte + 1]),
+        }
+    }
+
+    fn make_question(&mut self, start_byte: usize) -> Token<'a> {
+        self.advance(); // Consume '?'
+
+        match self.current {
+            Some((_, '.')) => self.make_single(tt![?.], start_byte),
+            Some((_, '?')) => self.make_single(tt![??], start_byte),
             _ => self.make_token(tt![-], start_byte, &self.input[start_byte..start_byte + 1]),
         }
     }

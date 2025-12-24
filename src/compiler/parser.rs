@@ -2,8 +2,8 @@ use simple_ternary::tnr;
 
 use super::{
     ast::{
-        AssignOp, AstArena, BinaryOp, Expr, ExprKind, Item, ItemKind, NamedField, Param, Path,
-        Stmt, StmtKind, Type, UnaryOp,
+        AssignOp, AstArena, BinaryOp, Expr, ExprKind, Item, ItemKind, Param,
+        Stmt, StmtKind, UnaryOp,
     },
     lexer::{LexError, Lexer},
     parse_rules::{InfixRule, ParseRule, Precedence, PrefixRule},
@@ -12,7 +12,7 @@ use super::{
 
 use crate::{
     arena::Interner,
-    compiler::ast::{ItemId, Pattern, TypeKind, Visibility},
+    compiler::ast::{ItemId, Pattern, Visibility},
     tt,
 };
 
@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
         let item = Item {
             vis: Visibility::Public,
             name: self.interner.get_or_intern_static("<package>"),
-            kind: ItemKind::Module { items },
+            kind: ItemKind::Module { decls: items },
             span: Span::default().merge(self.current.span),
         };
 
@@ -142,7 +142,7 @@ impl<'a> Parser<'a> {
         Ok(Item {
             vis,
             name: self.interner.get_or_intern(name.lexeme),
-            kind: ItemKind::Module { items },
+            kind: ItemKind::Module { decls: items },
             span: mod_token.span.merge(r_brace.span),
         })
     }
