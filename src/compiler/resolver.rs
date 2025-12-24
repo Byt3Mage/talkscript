@@ -339,6 +339,16 @@ impl<'a> NameResolver<'a> {
                 }
             }
 
+            ExprKind::UnionLit { ty: path, field } => {
+                if let Some(path_expr) = path {
+                    self.resolve_expr(*path_expr, in_scope_id);
+                }
+
+                if let Some(val) = field.value {
+                    self.resolve_expr(val, in_scope_id);
+                }
+            }
+
             ExprKind::TupleLit { fields } => {
                 for field in fields {
                     self.resolve_expr(*field, in_scope_id);

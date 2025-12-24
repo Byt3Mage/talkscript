@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     arena::StrSymbol,
-    compiler::{canon_ast::DeclId, type_info::TypeId},
+    compiler::{hir::HirDeclId, type_info::TypeId},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -20,13 +20,7 @@ pub enum ComptimeValue {
     Void,
     Array(Rc<[ComptimeValue]>),
     Option(Option<Box<ComptimeValue>>),
-    DeclKey {
-        decl_id: DeclId,
-    },
-    CallKey {
-        func_id: DeclId,
-        args: Rc<[ComptimeValue]>,
-    },
+    Function { decl_id: HirDeclId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

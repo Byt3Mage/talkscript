@@ -74,6 +74,11 @@ pub enum ExprKind {
         variant: Ident,
     },
 
+    UnionLit {
+        ty: Option<ExprId>,
+        field: FieldInit,
+    },
+
     // Tuple Literals
     TupleLit {
         fields: Vec<ExprId>,

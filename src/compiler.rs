@@ -1,11 +1,12 @@
 mod ast;
 mod canon_ast;
-mod comptime_evaluator;
 mod comptime_value;
+mod hir;
 mod lexer;
 mod parse_rules;
 mod parser;
 mod resolver;
+mod sema;
 mod tokens;
 mod type_info;
 
