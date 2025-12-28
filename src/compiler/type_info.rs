@@ -1,12 +1,75 @@
-use ahash::AHashMap;
-
 use crate::{
     arena::{Arena, Ident},
-    compiler::canon_ast::{Decl, DeclId},
+    compiler::ast::ItemId,
 };
 
 slotmap::new_key_type! {
     pub struct TypeId;
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeValue {
+    // Primitives
+    Int,
+    Uint,
+    Float,
+    Bool,
+    Char,
+    Str,
+    Cstr,
+    Void,
+    Never,
+
+    // Compound
+    Pointer { pointee: TypeId, mutable: bool },
+    Optional(TypeId),
+    Array { elem: TypeId, len: usize },
+    Slice(TypeId),
+    Tuple(Vec<TypeId>),
+
+    // User-defined
+    Struct(StructInfo),
+    Union(UnionInfo),
+    Enum(EnumInfo),
+
+    // Functions
+    Function { params: Vec<TypeId>, ret: TypeId },
+
+    // Placeholder for recursive types
+    Incomplete,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructInfo {
+    pub name: Ident,
+    pub fields: Vec<FieldInfo>,
+    pub methods: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionInfo {
+    pub name: Ident,
+    pub fields: Vec<FieldInfo>, // each field is a variant
+    pub methods: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumInfo {
+    pub name: Ident,
+    pub variants: Vec<VariantInfo>,
+    pub methods: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldInfo {
+    pub name: Ident,
+    pub ty: TypeId,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantInfo {
+    pub name: Ident,
+    pub value: i64, // resolved discriminant value
 }
 
 pub struct TypeArena {
@@ -16,7 +79,7 @@ pub struct TypeArena {
 impl TypeArena {
     pub fn new() -> Self {
         Self {
-            types: Arena::with_key(),
+            types: slotmap::SlotMap::with_key(),
         }
     }
 
@@ -30,106 +93,5 @@ impl TypeArena {
 
     pub fn get_mut(&mut self, id: TypeId) -> &mut TypeValue {
         &mut self.types[id]
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeValue {
-    Type,
-    Int,
-    Uint,
-    Float,
-    Bool,
-    Cstr,
-    Str,
-    Char,
-    Void,
-    Never,
-    Pointer { pointee: TypeId, mutable: bool },
-    Optional(TypeId),
-    Array { element: TypeId, len: i64 },
-    Slice(TypeId),
-    Tuple { fields: Vec<TypeId> },
-    Struct(StructInfo),
-    Enum(EnumInfo),
-    Union(UnionInfo),
-    Function(FunctionInfo),
-    Module(ModuleInfo),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldInfo {
-    pub name: Ident,
-    pub ty: TypeId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Declaration {
-    pub name: Ident,
-    pub id: DeclId,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct StructInfo {
-    pub fields: Vec<FieldInfo>,
-    pub decls: Vec<Declaration>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct UnionInfo {
-    pub fields: Vec<FieldInfo>,
-    pub decls: Vec<Declaration>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct VariantInfo {
-    pub name: Ident,
-    pub value: i64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct EnumInfo {
-    pub variants: Vec<VariantInfo>,
-    pub decls: Vec<Declaration>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParamInfo {
-    pub name: Option<Ident>,
-    pub ty: TypeId,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FunctionInfo {
-    pub params: Vec<ParamInfo>,
-    pub ret: TypeId,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModuleInfo {
-    pub decls: Vec<Declaration>,
-}
-
-impl StructInfo {
-    pub fn find_decl(&self, name: Ident) -> Option<&Declaration> {
-        self.decls.iter().find(|d| d.name == name)
-    }
-}
-
-impl UnionInfo {
-    pub fn find_decl(&self, name: Ident) -> Option<&Declaration> {
-        self.decls.iter().find(|d| d.name == name)
-    }
-}
-
-impl EnumInfo {
-    pub fn find_decl(&self, name: Ident) -> Option<&Declaration> {
-        self.decls.iter().find(|d| d.name == name)
-    }
-}
-
-impl ModuleInfo {
-    pub fn find_decl(&self, name: Ident) -> Option<&Declaration> {
-        self.decls.iter().find(|d| d.name == name)
     }
 }

@@ -5,8 +5,8 @@ use ahash::{AHashMap, AHashSet};
 use crate::vm::{
     Frame,
     heap::GCPtr,
-    module::CallInfo,
     object::{ObjTask, Value},
+    unit::CallInfo,
 };
 
 pub enum WaitReason {

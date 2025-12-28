@@ -140,28 +140,27 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_array(&mut self, is_ptr: bool, elems: &[Value]) -> GCPtr {
+    pub(super) fn alloc_array(&mut self, has_ptr: bool, elems: &[Value]) -> GCPtr {
         let len = elems.len();
         let size = size_of::<ObjArray>() + (len * size_of::<Value>());
         let layout = Layout::from_size_align(size, align_of::<ObjArray>()).unwrap();
 
         unsafe {
-            let ptr = self.allocator.alloc(layout);
+            let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.cast().write(ObjArray::new(
+            ptr.write(ObjArray::new(
                 GCHeader {
                     color: self.current_white,
-                    obj_type: tnr! {is_ptr => ObjType::PtrArray : ObjType::Array},
-                    layout,
+                    obj_type: tnr! {has_ptr => ObjType::PtrArray : ObjType::Array},
                     next: self.objects,
+                    layout,
                 },
-                len as u64,
+                len,
             ));
 
-            let data = ptr.add(size_of::<ObjArray>()).cast().as_ptr();
-            std::ptr::copy_nonoverlapping(elems.as_ptr(), data, len);
+            std::ptr::copy_nonoverlapping(elems.as_ptr(), ptr.as_ref().data(), len);
 
-            let ptr = GCPtr::new(ptr);
+            let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
             self.bytes_allocated += size;
 
@@ -170,23 +169,23 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_list(&mut self, is_ptr: bool, elems: &[Value]) -> GCPtr {
+    pub(super) fn alloc_list(&mut self, has_ptr: bool, elems: &[Value]) -> GCPtr {
         let layout = Layout::new::<ObjList>();
 
         unsafe {
-            let ptr = self.allocator.alloc(layout);
+            let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.cast().write(ObjList::new(
+            ptr.write(ObjList::new(
                 GCHeader {
                     color: self.current_white,
-                    obj_type: tnr! {is_ptr => ObjType::PtrList : ObjType::List},
+                    obj_type: tnr! {has_ptr => ObjType::PtrList : ObjType::List},
                     layout,
                     next: self.objects,
                 },
                 elems,
             ));
 
-            let ptr = GCPtr::new(ptr);
+            let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
             self.bytes_allocated += layout.size();
 
@@ -195,29 +194,28 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_struct(&mut self, ptr_mask: u64, words: &[Value]) -> GCPtr {
+    pub(super) fn alloc_struct(&mut self, has_ptr: bool, words: &[Value]) -> GCPtr {
         let word_size = words.len();
         let size = size_of::<ObjStruct>() + (word_size * size_of::<Value>());
         let layout = Layout::from_size_align(size, align_of::<ObjStruct>()).unwrap();
 
         unsafe {
-            let ptr = self.allocator.alloc(layout);
+            let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.cast().write(ObjStruct::new(
+            ptr.write(ObjStruct::new(
                 GCHeader {
                     color: self.current_white,
-                    obj_type: tnr! {ptr_mask != 0 => ObjType::PtrStruct : ObjType::Struct},
+                    obj_type: tnr! {has_ptr => ObjType::PtrStruct : ObjType::Struct},
                     layout,
                     next: self.objects,
                 },
-                word_size as u64,
-                ptr_mask,
+                word_size,
             ));
 
-            let data = ptr.add(size_of::<ObjStruct>()).cast().as_ptr();
-            std::ptr::copy_nonoverlapping(words.as_ptr(), data, word_size);
+            let fields = ptr.as_ref().fields_ptr();
+            std::ptr::copy_nonoverlapping(words.as_ptr(), fields, word_size);
 
-            let ptr = GCPtr::new(ptr);
+            let ptr = GCPtr::new(ptr.cast());
 
             self.objects = Some(ptr);
             self.bytes_allocated += size;
@@ -231,9 +229,9 @@ impl Heap {
         let layout = Layout::new::<ObjString>();
 
         unsafe {
-            let ptr = self.allocator.alloc(layout);
+            let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.cast().write(ObjString::new(
+            ptr.write(ObjString::new(
                 GCHeader {
                     color: self.current_white,
                     obj_type: ObjType::String,
@@ -243,7 +241,7 @@ impl Heap {
                 String::from(str),
             ));
 
-            let ptr = GCPtr::new(ptr);
+            let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
             self.bytes_allocated += layout.size();
 
@@ -256,9 +254,9 @@ impl Heap {
         let layout = Layout::new::<ObjTask>();
 
         unsafe {
-            let ptr = self.allocator.alloc(layout);
+            let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.cast().write(ObjTask::new(
+            ptr.write(ObjTask::new(
                 GCHeader {
                     color: self.current_white,
                     obj_type: ObjType::Task,
@@ -268,7 +266,7 @@ impl Heap {
                 data,
             ));
 
-            let ptr = GCPtr::new(ptr);
+            let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
             self.bytes_allocated += layout.size();
 
@@ -276,14 +274,10 @@ impl Heap {
         }
     }
 
-    fn mark_roots(&mut self, roots: &[Value]) {
+    fn mark_roots(&mut self, roots: &[GCPtr]) {
         self.gray = None;
         self.gray_again = None;
-
-        for &root in roots {
-            self.mark_object(root.get());
-        }
-
+        roots.iter().for_each(|&r| self.mark_object(r));
         self.gc_state = GCState::Propagate;
     }
 
@@ -366,10 +360,8 @@ impl Heap {
             }
             ObjType::PtrStruct => {
                 let st = obj.as_ref::<ObjStruct>();
-                for (i, &v) in st.fields().iter().enumerate() {
-                    if st.has_ptr_at(i) {
-                        self.mark_object(v.get());
-                    }
+                for ptr in st.iter().filter_map(|v| v.try_get()) {
+                    self.mark_object(ptr);
                 }
             }
             ObjType::Task => todo!("trace task children"),
@@ -377,12 +369,10 @@ impl Heap {
         }
     }
 
-    fn atomic(&mut self, roots: &[Value]) -> usize {
+    fn atomic(&mut self, roots: &[GCPtr]) -> usize {
         let mut work = 0;
 
-        for &root in roots {
-            self.mark_object(root.get());
-        }
+        roots.iter().for_each(|&r| self.mark_object(r));
 
         // TODO: remark upvalues
         // traverse objects caught by write barrier.
@@ -458,7 +448,7 @@ impl Heap {
         size
     }
 
-    fn step_gc(&mut self, roots: &[Value], limit: usize) -> usize {
+    fn step_gc(&mut self, roots: &[GCPtr], limit: usize) -> usize {
         let mut cost = 0;
 
         match self.gc_state {
@@ -547,7 +537,7 @@ impl Heap {
 
     /// Public GC step function - performs incremental GC work
     /// Returns the amount of work done
-    pub fn gc_step(&mut self, roots: &[Value], limit: usize) -> usize {
+    pub fn gc_step(&mut self, roots: &[GCPtr], limit: usize) -> usize {
         // Check if we should start a new cycle
         if self.gc_state == GCState::Pause && self.bytes_allocated > self.gc_threshold {
             self.step_gc(roots, limit);

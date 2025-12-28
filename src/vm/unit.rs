@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::vm::{VMResult, instruction::Instruction, object::Value, safepoint::SafePointTable};
+use crate::vm::{VMResult, instruction::Instruction, object::Value};
 
 /// A single compilation unit
 pub struct Unit {
@@ -39,9 +39,6 @@ pub struct CallInfo {
 
     /// Start register for return value
     pub ret_reg: u8,
-
-    /// Safe points containing map of pointer registers
-    pub safe_points: SafePointTable,
 }
 
 #[derive(Debug, Clone)]
@@ -83,11 +80,11 @@ pub struct ExportTable {
 pub struct FunctionExport {
     /// Index into [Unit::functions]
     pub index: usize,
-    // type-checking info
+    // TODO: type-checking info
 }
 
 pub struct NativeFunctionExport {
     /// Index into [Unit::native_functions]
     pub index: usize,
-    // type-checking info
+    // TODO: type-checking info
 }

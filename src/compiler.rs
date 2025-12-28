@@ -1,13 +1,10 @@
 mod ast;
-mod canon_ast;
-mod comptime_value;
-mod hir;
 mod lexer;
+mod name_resolver;
 mod parse_rules;
 mod parser;
-mod resolver;
-mod sema;
 mod tokens;
+mod type_checker;
 mod type_info;
 
 #[cfg(test)]

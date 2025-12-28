@@ -6,8 +6,8 @@ use crate::vm::{
     async_runtime::{Scheduler, Task, WaitReason},
     heap::{GCPtr, Heap},
     instruction::*,
-    module::{CallInfo, FuncInfo, NativeFuncInfo, Unit},
-    object::{ObjTask, Value},
+    object::{AsValue, ObjTask, Value},
+    unit::{CallInfo, FuncInfo, NativeFuncInfo, Unit},
 };
 
 pub mod allocator;
@@ -16,9 +16,9 @@ pub mod function;
 pub mod heap;
 pub mod instruction;
 mod memory;
-pub mod module;
 pub mod object;
 pub mod safepoint;
+pub mod unit;
 
 #[derive(Debug, Copy, Clone, Error)]
 pub enum VMError {
@@ -97,23 +97,28 @@ impl VM {
     }
 
     #[inline(always)]
-    fn set_reg(&mut self, reg: u8, value: impl Into<Value>) {
-        self.regs[self.base_reg + reg as usize] = value.into();
+    fn set_reg(&mut self, reg: u8, value: impl AsValue) {
+        self.regs[self.base_reg + reg as usize] = value.into_value();
     }
 
     #[inline(always)]
-    fn two_reg<T: From<Value>>(&self, reg_a: u8, reg_b: u8) -> (T, T) {
+    fn set_reg_raw(&mut self, reg: u8, value: Value) {
+        self.regs[self.base_reg + reg as usize] = value;
+    }
+
+    #[inline(always)]
+    fn two_reg<T: AsValue>(&self, reg_a: u8, reg_b: u8) -> (T, T) {
         (self.reg(reg_a).get(), self.reg(reg_b).get())
     }
 
     #[inline(always)]
     fn exec_mov(&mut self, i: Instruction) {
-        self.set_reg(i.a(), self.reg(i.b()));
+        self.set_reg_raw(i.a(), self.reg(i.b()));
     }
 
     #[inline(always)]
     fn exec_load(&mut self, i: Instruction) {
-        self.set_reg(i.a(), self.constants[i.bx() as usize]);
+        self.set_reg_raw(i.a(), self.constants[i.bx() as usize]);
     }
 
     #[inline(always)]
@@ -551,8 +556,6 @@ impl VM {
     }
 
     fn collect_roots(&self) -> Vec<GCPtr> {
-        let roots = Vec::new();
-
-        roots
+        self.regs.iter().filter_map(|v| v.try_get()).collect()
     }
 }

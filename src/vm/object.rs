@@ -3,19 +3,41 @@ use std::{fmt::Debug, slice::Iter};
 use crate::vm::{
     Task,
     heap::{GCHeader, GCPtr},
+    object::private::Sealed,
 };
 
 macro_rules! value {
-    ($($field: ident : $ty: ty),*$(,)?) => {
+    ($($field: ident : $ty: path),* $(,)?) => {
+        mod private {
+            pub trait Sealed {}
+        }
+
+        pub trait AsValue: Sealed + Sized {
+            const TYPE: ValueType;
+            fn from_value(value: Value) -> Self;
+            fn into_value(self: Self) -> Value;
+            fn try_from_value(value: Value) -> Option<Self>;
+        }
+
+        #[repr(u8)]
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub enum ValueType {
+            $($field),*
+        }
+
         #[repr(C)]
         #[derive(Clone, Copy)]
-        pub union Value {
+        union ValueData {
             $($field: $ty),*
         }
 
-        // ASSERTIONS
-        $( const _: () = assert!(!std::mem::needs_drop::<$ty>()); )*
-        const _: () = assert!(size_of::<Value>() == size_of::<u64>() && align_of::<Value>() == align_of::<u64>());
+        #[derive(Clone, Copy)]
+        pub struct Value {
+            data: ValueData,
+            ty: ValueType,
+        }
+
+        const _: () = assert!(align_of::<Value>() == align_of::<u64>());
 
         impl Value {
             #[inline(always)]
@@ -24,32 +46,39 @@ macro_rules! value {
             }
 
             #[inline(always)]
-            pub fn get<T: From<Self>>(self) -> T {
-                self.into()
+            pub fn get<T: AsValue>(self) -> T {
+                T::from_value(self)
             }
 
             #[inline(always)]
-            pub fn set(&mut self, v: impl Into<Self>) {
-                *self = v.into();
+            pub fn try_get<T: AsValue>(self) -> Option<T> {
+                T::try_from_value(self)
             }
-        }
 
-        impl Debug for Value {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_fmt(format_args!("{}", unsafe { std::mem::transmute::<_, u64>(*self) }))
+            #[inline(always)]
+            pub fn set(&mut self, v: impl AsValue) {
+                *self = v.into_value();
             }
         }
 
         $(
-            impl From<$ty> for Value {
-                fn from(value: $ty) -> Self {
-                    Self { $field: value }
-                }
-            }
+            impl Sealed for $ty {}
+            impl AsValue for $ty {
+                const TYPE: ValueType = ValueType::$field;
 
-            impl From<Value> for $ty {
-                fn from(value: Value) -> Self {
-                    unsafe { value.$field }
+                fn from_value(value: Value) -> Self {
+                    unsafe { value.data.$field }
+                }
+
+                fn into_value(self: Self) -> Value {
+                    Value {
+                        data: ValueData { $field: self },
+                        ty: Self::TYPE,
+                    }
+                }
+
+                fn try_from_value(value: Value) -> Option<Self> {
+                    (value.ty == Self::TYPE).then_some(unsafe { value.data.$field })
                 }
             }
         )*
@@ -57,14 +86,14 @@ macro_rules! value {
 }
 
 value! {
-    ptr: GCPtr,
-    int: i64,
-    uint: u64,
-    bool: bool,
-    float: f64,
+    Ptr: GCPtr,
+    Int: i64,
+    Uint: u64,
+    Bool: bool,
+    Float: f64,
     // Niche values that can live in a single register
-    opt_bol: Option<bool>,
-    opt_ptr: Option<GCPtr>,
+    OptPtr: Option<GCPtr>,
+    OptBool: Option<bool>,
 }
 
 #[repr(u8)]
@@ -78,27 +107,24 @@ pub enum ObjType {
     String,
     Task,
 
-    /// Array with pointer elements
+    // GC Objects that hold pointers
     PtrArray,
-    /// List with pointer elements
     PtrList,
-    /// Structs with pointer field(s)
     PtrStruct,
 }
 
 #[repr(C)]
 pub struct ObjArray {
     header: GCHeader,
-    len: u64,
     pub gc_list: Option<GCPtr>,
-    // Array data follows after (inline allocation)
+    len: usize,
     data: [Value; 0],
 }
 
 impl ObjArray {
     const _ASSERT: () = assert!(align_of::<Self>() == align_of::<Value>());
 
-    pub fn new(header: GCHeader, len: u64) -> Self {
+    pub fn new(header: GCHeader, len: usize) -> Self {
         Self {
             header,
             len,
@@ -108,7 +134,7 @@ impl ObjArray {
     }
 
     #[inline(always)]
-    pub fn len(&self) -> u64 {
+    pub fn len(&self) -> usize {
         self.len
     }
 
@@ -124,7 +150,7 @@ impl ObjArray {
 
     #[inline(always)]
     pub fn as_slice_mut(&mut self) -> &mut [Value] {
-        unsafe { std::slice::from_raw_parts_mut(self.data(), self.len as usize) }
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.len) }
     }
 
     pub fn iter(&'_ self) -> Iter<'_, Value> {
@@ -135,16 +161,16 @@ impl ObjArray {
 #[repr(C)]
 pub(super) struct ObjList {
     header: GCHeader,
-    data: Vec<Value>,
     pub gc_list: Option<GCPtr>,
+    data: Vec<Value>,
 }
 
 impl ObjList {
     pub fn new(header: GCHeader, elems: &[Value]) -> Self {
         Self {
             header,
-            data: elems.iter().copied().collect(),
             gc_list: None,
+            data: elems.iter().copied().collect(),
         }
     }
 
@@ -167,39 +193,41 @@ impl ObjList {
 #[repr(C)]
 pub(super) struct ObjStruct {
     header: GCHeader,
-    size_in_words: u64,
-    ptr_mask: u64,
     pub gc_list: Option<GCPtr>,
-    data: [Value; 0],
+    size_in_words: usize,
+    fields: [Value; 0],
 }
 
 impl ObjStruct {
     const _ASSERT: () = assert!(align_of::<Self>() == align_of::<Value>());
 
-    pub fn new(header: GCHeader, size_in_words: u64, ptr_mask: u64) -> Self {
+    pub fn new(header: GCHeader, size_in_words: usize) -> Self {
         Self {
             header,
-            size_in_words,
-            ptr_mask,
             gc_list: None,
-            data: [],
+            size_in_words,
+            fields: [],
         }
     }
 
     #[inline(always)]
     pub(super) fn fields_ptr(&self) -> *mut Value {
-        self.data.as_ptr().cast_mut()
-    }
-
-    #[inline(always)]
-    pub(super) fn has_ptr_at(&self, index: usize) -> bool {
-        debug_assert!(index < 64, "structs can't have more than 64 fields");
-        (self.ptr_mask & (1 << index)) != 0
+        self.fields.as_ptr().cast_mut()
     }
 
     #[inline(always)]
     pub fn fields(&self) -> &[Value] {
-        unsafe { std::slice::from_raw_parts(self.fields_ptr(), self.size_in_words as usize) }
+        unsafe { std::slice::from_raw_parts(self.fields_ptr(), self.size_in_words) }
+    }
+
+    #[inline(always)]
+    pub fn fields_mut(&self) -> &mut [Value] {
+        unsafe { std::slice::from_raw_parts_mut(self.fields_ptr(), self.size_in_words) }
+    }
+
+    #[inline(always)]
+    pub fn iter(&self) -> Iter<'_, Value> {
+        self.fields().iter()
     }
 }
 

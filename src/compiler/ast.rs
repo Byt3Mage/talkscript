@@ -6,6 +6,7 @@ slotmap::new_key_type! {
     pub struct StmtId;
     pub struct ItemId;
     pub struct PatternId;
+    pub struct AstTypeId;
 }
 
 pub struct AstArena {
@@ -13,6 +14,7 @@ pub struct AstArena {
     pub stmts: Arena<StmtId, Stmt>,
     pub items: Arena<ItemId, Item>,
     pub patterns: Arena<PatternId, Pattern>,
+    pub types: Arena<AstTypeId, AstType>,
 }
 
 impl AstArena {
@@ -22,13 +24,127 @@ impl AstArena {
             stmts: Arena::with_key(),
             items: Arena::with_key(),
             patterns: Arena::with_key(),
+            types: Arena::with_key(),
         }
     }
 }
 
-// ============================================================================
-// Expressions
-// ============================================================================
+#[derive(Debug, Clone)]
+pub struct Path {
+    pub segments: Vec<PathSegment>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct PathSegment {
+    pub name: Ident,
+    pub type_args: Vec<AstTypeId>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstType {
+    pub kind: AstTypeKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum AstTypeKind {
+    // int, float, std::collections::List, List<int>
+    Path(Path),
+
+    // @T, @mut T
+    Pointer {
+        pointee: AstTypeId,
+        mutable: bool,
+    },
+
+    // ?T
+    Optional(AstTypeId),
+
+    // [T; N]
+    Array {
+        elem: AstTypeId,
+        size: ExprId,
+    },
+
+    // [T]
+    Slice(AstTypeId),
+
+    // (A, B, C)
+    Tuple(Vec<AstTypeId>),
+
+    // fn(A, B) -> C
+    Function {
+        params: Vec<AstTypeId>,
+        ret: AstTypeId,
+    },
+
+    // Self
+    SelfType,
+
+    // _
+    Infer,
+
+    // struct { x: int, y: int }
+    AnonStruct(Vec<AnonField>),
+
+    // union { ok: int, err: cstr }
+    AnonUnion(Vec<AnonField>),
+
+    // enum { Red, Green, Blue }
+    AnonEnum(Vec<AnonEnumVariant>),
+}
+
+#[derive(Debug, Clone)]
+pub struct AnonField {
+    pub name: Ident,
+    pub ty: AstTypeId,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnonEnumVariant {
+    pub name: Ident,
+    pub value: Option<ExprId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GenericParams {
+    pub params: Vec<GenericParam>,
+}
+
+impl GenericParams {
+    pub fn new() -> Self {
+        Self { params: vec![] }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name: Ident,
+    pub kind: GenericParamKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum GenericParamKind {
+    // <T>, <T = int>
+    Type {
+        default: Option<AstTypeId>,
+    },
+
+    // <const N: int>, <const N: int = 10>
+    Const {
+        ty: AstTypeId,
+        default: Option<ExprId>,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct Expr {
@@ -38,51 +154,50 @@ pub struct Expr {
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
-    // ===== Literals =====
     Int(i64),
     Uint(u64),
     Float(f64),
     Bool(bool),
     Char(char),
     CStr(StrSymbol),
-    Null,
     Void,
 
-    // ===== Identifiers and Paths =====
-    Ident(Ident),
+    // x, std::math::sqrt, Option::<int>
+    Path(Path),
 
-    // ===== Grouping =====
     Group(ExprId),
 
-    // ===== Array Literals =====
     ArrayLit(Vec<ExprId>),
     ArrayRepeat {
         value: ExprId,
         count: ExprId,
     },
 
-    // ===== Struct/Union Literals =====
     // Point { x: 10, y: 20 }
-    // .{ x: 10, y: 20 } (anonymous, type inferred)
+    // std::geo::Point::<int> { x: 10, y: 20 }
     StructLit {
-        path: Option<ExprId>, // None = anonymous literal
+        path: Path,
         fields: Vec<FieldInit>,
     },
 
-    // ===== Enum Literals =====
-    // Status::Active
-    // ::Active (anonymous, type inferred)
-    EnumLit {
-        path: Option<ExprId>, // None = anonymous literal (::Variant)
-        variant: Ident,
+    // .{ x: 10, y: 20 }
+    AnonStructLit {
+        fields: Vec<FieldInit>,
     },
 
-    // ===== Tuple Literals =====
-    TupleLit {
-        fields: Vec<ExprId>,
+    // Option::<int> { some: 42 }
+    UnionLit {
+        path: Path,
+        field: FieldInit,
     },
 
-    // ===== Operators =====
+    // .{ ok: 42 }
+    AnonUnionLit {
+        field: FieldInit,
+    },
+
+    TupleLit(Vec<ExprId>),
+
     Unary {
         op: UnaryOp,
         expr: ExprId,
@@ -93,27 +208,24 @@ pub enum ExprKind {
         rhs: ExprId,
     },
 
-    // ===== Assignment =====
     Assign {
         op: AssignOp,
-        tgt: ExprId,
-        val: ExprId,
+        target: ExprId,
+        value: ExprId,
     },
 
-    // ===== Type Operations =====
     Cast {
         expr: ExprId,
-        ty: ExprId, // Type expression
+        ty: AstTypeId,
     },
 
-    // ===== Control Flow =====
     If {
         cond: ExprId,
         then_branch: ExprId,
         else_branch: Option<ExprId>,
     },
     Match {
-        expr: ExprId,
+        scrutinee: ExprId,
         arms: Vec<MatchArm>,
     },
     While {
@@ -127,120 +239,63 @@ pub enum ExprKind {
         body: ExprId,
     },
 
-    // ===== Blocks =====
     Block(Vec<StmtId>),
 
-    // ===== Jump Statements =====
-    Return(ExprId),
+    Return(Option<ExprId>),
     Break(Option<ExprId>),
     Continue,
 
-    // ===== Function Call =====
     Call {
         callee: ExprId,
         args: Vec<ExprId>,
     },
 
-    // ===== Field Access =====
+    MethodCall {
+        receiver: ExprId,
+        method: Ident,
+        type_args: Vec<AstTypeId>,
+        args: Vec<ExprId>,
+    },
+
     Field {
         object: ExprId,
         field: Ident,
     },
 
-    // ===== Optional Field Access =====
-    // obj?.field
-    OptionalField {
+    OptionalChain {
         object: ExprId,
         field: Ident,
     },
 
-    // ===== Scope Access =====
-    // namespace::declaration (replaces Path)
-    // std::collections::Vec
-    ScopeAccess {
-        object: ExprId, // LHS: expression that must evaluate to type/namespace
-        name: Ident,    // RHS: declaration name
-    },
-
-    // ===== Index =====
     Index {
         object: ExprId,
         index: ExprId,
     },
 
-    // ===== Range =====
     Range {
         start: Option<ExprId>,
         end: Option<ExprId>,
         inclusive: bool,
     },
 
-    //  ===== Optional Expressions =====
-    Unwrap(ExprId), // x!
+    Unwrap(ExprId),
 
-    // ===== Comptime Expression =====
-    // comptime <expr> - forces compile-time evaluation
     Comptime(ExprId),
-
-    // ===== Type Literals (return type values) =====
-
-    // struct { x: int, y: float }
-    StructType {
-        fields: Vec<Field>,
-    },
-
-    // enum { Active = 0, Inactive }
-    EnumType {
-        variants: Vec<EnumVariant>,
-    },
-
-    // union { Some: T, None }
-    UnionType {
-        fields: Vec<Field>,
-    },
-
-    // (int, float, bool)
-    TupleType {
-        fields: Vec<ExprId>,
-    },
-
-    // ?int, ?Point
-    OptionalType(ExprId),
-
-    // Pointer type
-    // @int @mut float
-    PointerType {
-        pointee: ExprId,
-        mutable: bool,
-    },
-
-    // mod {const PI = 3.14; fn sin() {...} }
-    ModuleType {
-        decls: Vec<ItemId>,
-    },
-
-    // fn(int, float) -> bool
-    FunctionType {
-        params: Vec<ExprId>,
-        ret: ExprId,
-    },
 }
 
 #[derive(Debug, Clone)]
 pub struct FieldInit {
     pub name: Ident,
-    pub value: Option<ExprId>, // None for field punning
+    pub value: Option<ExprId>,
     pub span: Span,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
-    Neg,    // -
-    Not,    // !
-    BitNot, // ~
-    Ref,    // &
-    RefMut, // &mut
-    Deref,  // *
+    Neg,
+    Not,
+    BitNot,
+    Deref,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -255,12 +310,12 @@ pub enum BinaryOp {
     BitXor,
     Shl,
     Shr,
-    Equal,
-    NotEqual,
-    Less,
-    Greater,
-    LessEqual,
-    GreaterEqual,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
     And,
     Or,
     UnwrapOr,
@@ -286,6 +341,7 @@ pub struct MatchArm {
     pub pattern: PatternId,
     pub guard: Option<ExprId>,
     pub body: ExprId,
+    pub span: Span,
 }
 
 // ============================================================================
@@ -300,21 +356,21 @@ pub struct Stmt {
 
 #[derive(Debug, Clone)]
 pub enum StmtKind {
-    // Empty statement
-    Semi,
-
-    // Variable declaration
-    VarDecl {
+    // let x = 5;
+    // let x: int = 5;
+    // let mut x = 5;
+    Let {
         pattern: PatternId,
-        ty: Option<ExprId>, // Type expression (optional)
+        ty: Option<AstTypeId>,
         value: ExprId,
     },
 
-    // Expression statement
     Expr {
         expr: ExprId,
         has_semi: bool,
     },
+
+    Empty,
 }
 
 // ============================================================================
@@ -331,47 +387,50 @@ pub struct Pattern {
 pub enum PatternKind {
     Wildcard,
 
-    Variable {
-        is_comptime: bool,
+    Binding {
         mutable: bool,
         name: Ident,
     },
 
-    // Literals
     Int(i64),
     Float(f64),
     Bool(bool),
     Char(char),
-    String(StrSymbol),
+    CStr(StrSymbol),
+    Path(Path),
 
-    // Struct/Union pattern
     // Point { x, y }
-    // .{ x, y } (anonymous)
+    // std::geo::Point { x, y, .. }
     Struct {
-        path: Option<ExprId>,
+        path: Path,
         fields: Vec<FieldPattern>,
+        rest: bool,
     },
 
-    // Tuple pattern
-    Tuple {
-        elements: Vec<PatternId>,
+    // .{ x, y }
+    // .{ x, y, ..}
+    AnonStruct {
+        fields: Vec<FieldPattern>,
+        rest: bool,
     },
 
-    // Enum pattern
-    // Status::Active
-    // ::Active (anonymous)
-    Enum {
-        path: Option<ExprId>,
-        variant: Ident,
+    // Option::<int> { some: x }
+    Union {
+        path: Path,
+        field: FieldPattern,
     },
 
-    // Literal expression pattern
-    Lit(ExprId),
+    // .{ ok: x }
+    AnonUnion {
+        field: FieldPattern,
+    },
 
-    // Or pattern
+    Tuple(Vec<PatternId>),
+
+    Array(Vec<PatternId>),
+
     Or(Vec<PatternId>),
 
-    // Range pattern
     Range {
         start: Option<ExprId>,
         end: Option<ExprId>,
@@ -387,7 +446,7 @@ pub struct FieldPattern {
 }
 
 // ============================================================================
-// Items (top-level declarations)
+// Items (Top-level Declarations)
 // ============================================================================
 
 #[derive(Debug, Clone)]
@@ -406,110 +465,105 @@ pub enum Visibility {
 
 #[derive(Debug, Clone)]
 pub enum ItemKind {
-    // Module
-    // mod math {comptime val PI = 3.14; }
-    // Desugars to: comptime math = mod { comptime PI = 3.14; }
+    // mod foo { ... }
     Module {
-        decls: Vec<ItemId>,
+        items: Vec<ItemId>,
     },
 
-    // Function
-    // fn foo() { }
-    // comptime fn foo() { } (comptime function)
-    // fn foo(comptime T: type) { } (runtime fn with comptime params)
+    // fn foo<T>(x: T) -> T { ... }
     Function {
-        is_comptime: bool,
+        generics: GenericParams,
         params: Vec<Param>,
-        ret: ExprId, // Return type expression
+        ret: Option<AstTypeId>,
         body: ExprId,
     },
 
-    // Struct
     // struct Point { x: int, y: int }
-    // struct Pair(T: type, U: type) { first: T, second: U }
+    // struct Pair<T, U> { first: T, second: U }
     Struct {
-        comptime_params: ComptimeParams,
+        generics: GenericParams,
         fields: Vec<Field>,
-        methods: Vec<ItemId>,
     },
 
-    // Union
-    // union Result {Ok: int, Err: cstr}
-    // union Option(T: type) { Some: T, None }
-    Union {
-        comptime_params: ComptimeParams,
-        variants: Vec<Field>,
-        methods: Vec<ItemId>,
-    },
-
-    // Enum (C-style discriminated integers)
-    // enum Status { Active = 0, Inactive }
+    // enum Color { Red = 0, Green, Blue }
     Enum {
-        variants: Vec<EnumVariant>,
-        methods: Vec<ItemId>,
+        variants: Vec<Variant>,
     },
 
-    // Constant
-    // const MAX = 100;
-    // const Vec(T: type) = [T; 3];
-    // const math = import(std)::math;
+    // union Option<T> { some: T, none: void }
+    // union Result<T, E> { ok: T, err: E }
+    Union {
+        generics: GenericParams,
+        fields: Vec<Field>,
+    },
+
+    // const PI: float = 3.14159;
     Const {
-        comptime_params: ComptimeParams,
-        ty: Option<ExprId>, // Type expression (optional)
+        ty: Option<AstTypeId>,
         value: ExprId,
     },
+
+    // type StringList = List<str>;
+    TypeAlias {
+        generics: GenericParams,
+        ty: AstTypeId,
+    },
+
+    // impl Point { ... }
+    // impl<T> List<T> { ... }
+    Impl {
+        generics: GenericParams,
+        self_ty: AstTypeId,
+        items: Vec<ItemId>,
+    },
+
+    // import std::math;
+    // import {math, constants} from std;
+    Import(Import),
 }
 
 // ============================================================================
-// Comptime Parameters (formerly "Generics")
-// ============================================================================
-
-#[derive(Clone, Debug, Default)]
-pub struct ComptimeParams {
-    pub params: Vec<ComptimeParam>,
-}
-
-impl ComptimeParams {
-    pub fn is_empty(&self) -> bool {
-        self.params.is_empty()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ComptimeParam {
-    pub name: Ident,
-    pub ty: ExprId, // Type expression (e.g., "type", "int")
-    pub span: Span,
-}
-
-// ============================================================================
-// Fields and Variants
+// Import
 // ============================================================================
 
 #[derive(Debug, Clone)]
-pub struct Field {
-    pub name: Ident,
-    pub ty: ExprId, // Type expression
+pub struct Import {
+    pub kind: ImportKind,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct EnumVariant {
-    pub name: Ident,
-    pub value: Option<ExprId>, // Optional explicit value
-    pub span: Span,
+pub enum ImportKind {
+    // import std::math;
+    Simple(Path),
+
+    // import {math, constants} from std;
+    From { imports: Vec<Path>, source: Path },
 }
 
 // ============================================================================
-// Function Parameters
+// Item Components
 // ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct Param {
-    pub is_comptime: bool, // Marked with comptime keyword
-    pub mutable: bool,
+    pub pattern: PatternId,
+    pub ty: AstTypeId,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub visibility: Visibility,
     pub name: Ident,
-    pub ty: ExprId, // Type expression
+    pub ty: AstTypeId,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub name: Ident,
+    pub value: Option<ExprId>,
     pub span: Span,
 }
 
@@ -518,10 +572,41 @@ pub struct Param {
 // ============================================================================
 
 impl Expr {
-    pub fn is_assignable(&self) -> bool {
+    pub fn is_place(&self) -> bool {
         matches!(
             self.kind,
-            ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+            ExprKind::Path(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Unary {
+                    op: UnaryOp::Deref,
+                    ..
+                }
         )
+    }
+}
+
+impl Path {
+    pub fn single(name: Ident, span: Span) -> Self {
+        Self {
+            segments: vec![PathSegment {
+                name,
+                type_args: vec![],
+                span,
+            }],
+            span,
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.segments.len() == 1 && self.segments[0].type_args.is_empty()
+    }
+
+    pub fn as_single(&self) -> Option<Ident> {
+        if self.is_single() {
+            Some(self.segments[0].name)
+        } else {
+            None
+        }
     }
 }

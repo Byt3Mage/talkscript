@@ -1,4 +1,4 @@
-use crate::vm::{VMResult, module::NativeFuncInfo, object::Value};
+use crate::vm::{VMResult, object::Value, unit::NativeFuncInfo};
 
 /// A type that can be constructed from a slice of Values
 pub trait FromValues: Sized + 'static {
