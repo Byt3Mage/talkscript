@@ -1,7 +1,5 @@
 use std::{alloc::Layout, ptr::NonNull};
 
-use simple_ternary::tnr;
-
 use crate::vm::{
     allocator::{Allocator, BumpAllocator},
     async_runtime::Task,
@@ -140,25 +138,22 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_array(&mut self, has_ptr: bool, elems: &[Value]) -> GCPtr {
-        let len = elems.len();
-        let size = size_of::<ObjArray>() + (len * size_of::<Value>());
-        let layout = Layout::from_size_align(size, align_of::<ObjArray>()).unwrap();
+    pub(super) fn alloc_buffer(&mut self, size: usize) -> GCPtr {
+        let obj_size = size_of::<GCBuffer>() + (size * size_of::<Value>());
+        let layout = Layout::from_size_align(obj_size, align_of::<GCBuffer>()).unwrap();
 
         unsafe {
             let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.write(ObjArray::new(
+            ptr.write(GCBuffer::new(
                 GCHeader {
                     color: self.current_white,
-                    obj_type: tnr! {has_ptr => ObjType::PtrArray : ObjType::Array},
+                    obj_type: ObjType::Buffer,
                     next: self.objects,
                     layout,
                 },
-                len,
+                size,
             ));
-
-            std::ptr::copy_nonoverlapping(elems.as_ptr(), ptr.as_ref().data(), len);
 
             let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
@@ -169,21 +164,18 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_list(&mut self, has_ptr: bool, elems: &[Value]) -> GCPtr {
-        let layout = Layout::new::<ObjList>();
+    pub(super) fn alloc_dyn_buffer(&mut self) -> GCPtr {
+        let layout = Layout::new::<GCDynBuffer>();
 
         unsafe {
             let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.write(ObjList::new(
-                GCHeader {
-                    color: self.current_white,
-                    obj_type: tnr! {has_ptr => ObjType::PtrList : ObjType::List},
-                    layout,
-                    next: self.objects,
-                },
-                elems,
-            ));
+            ptr.write(GCDynBuffer::new(GCHeader {
+                color: self.current_white,
+                obj_type: ObjType::DynBuffer,
+                layout,
+                next: self.objects,
+            }));
 
             let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
@@ -194,52 +186,18 @@ impl Heap {
     }
 
     #[inline]
-    pub(super) fn alloc_struct(&mut self, has_ptr: bool, words: &[Value]) -> GCPtr {
-        let word_size = words.len();
-        let size = size_of::<ObjStruct>() + (word_size * size_of::<Value>());
-        let layout = Layout::from_size_align(size, align_of::<ObjStruct>()).unwrap();
+    pub(super) fn alloc_string(&mut self) -> GCPtr {
+        let layout = Layout::new::<GCString>();
 
         unsafe {
             let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.write(ObjStruct::new(
-                GCHeader {
-                    color: self.current_white,
-                    obj_type: tnr! {has_ptr => ObjType::PtrStruct : ObjType::Struct},
-                    layout,
-                    next: self.objects,
-                },
-                word_size,
-            ));
-
-            let fields = ptr.as_ref().fields_ptr();
-            std::ptr::copy_nonoverlapping(words.as_ptr(), fields, word_size);
-
-            let ptr = GCPtr::new(ptr.cast());
-
-            self.objects = Some(ptr);
-            self.bytes_allocated += size;
-
-            ptr
-        }
-    }
-
-    #[inline]
-    pub(super) fn alloc_string(&mut self, str: &str) -> GCPtr {
-        let layout = Layout::new::<ObjString>();
-
-        unsafe {
-            let ptr = self.allocator.alloc(layout).cast();
-
-            ptr.write(ObjString::new(
-                GCHeader {
-                    color: self.current_white,
-                    obj_type: ObjType::String,
-                    layout,
-                    next: self.objects,
-                },
-                String::from(str),
-            ));
+            ptr.write(GCString::new(GCHeader {
+                color: self.current_white,
+                obj_type: ObjType::String,
+                layout,
+                next: self.objects,
+            }));
 
             let ptr = GCPtr::new(ptr.cast());
             self.objects = Some(ptr);
@@ -251,12 +209,12 @@ impl Heap {
 
     #[inline]
     pub(super) fn alloc_task(&mut self, data: Task) -> GCPtr {
-        let layout = Layout::new::<ObjTask>();
+        let layout = Layout::new::<GCTask>();
 
         unsafe {
             let ptr = self.allocator.alloc(layout).cast();
 
-            ptr.write(ObjTask::new(
+            ptr.write(GCTask::new(
                 GCHeader {
                     color: self.current_white,
                     obj_type: ObjType::Task,
@@ -291,40 +249,31 @@ impl Heap {
         header.color = GCColor::Gray;
 
         match header.obj_type {
-            ObjType::PtrArray => {
-                obj.as_mut::<ObjArray>().gc_list = self.gray;
-                self.gray = Some(obj)
+            ObjType::Buffer => {
+                obj.as_mut::<GCBuffer>().gc_list = self.gray;
+                self.gray = Some(obj);
             }
-            ObjType::PtrList => {
-                obj.as_mut::<ObjList>().gc_list = self.gray;
-                self.gray = Some(obj)
-            }
-            ObjType::PtrStruct => {
-                obj.as_mut::<ObjStruct>().gc_list = self.gray;
-                self.gray = Some(obj)
+            ObjType::DynBuffer => {
+                obj.as_mut::<GCDynBuffer>().gc_list = self.gray;
+                self.gray = Some(obj);
             }
             ObjType::Task => todo!("mark task"),
-            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {
-                header.color = GCColor::Black
-            }
+            ObjType::String => header.color = GCColor::Black,
         }
     }
 
     fn propagate_mark(&mut self, mut obj: GCPtr) -> usize {
         match obj.ty() {
-            ObjType::PtrArray => {
-                let arr = obj.as_mut::<ObjArray>();
-                self.gray = arr.gc_list;
+            ObjType::Buffer => {
+                let buff = obj.as_mut::<GCBuffer>();
+                self.gray = buff.gc_list;
             }
-            ObjType::PtrList => {
-                let list = obj.as_mut::<ObjList>();
+            ObjType::DynBuffer => {
+                let list = obj.as_mut::<GCDynBuffer>();
                 self.gray = list.gc_list;
             }
-            ObjType::PtrStruct => {
-                let st = obj.as_mut::<ObjStruct>();
-                self.gray = st.gc_list;
-            }
-            ObjType::Array | ObjType::List | ObjType::Struct | ObjType::String | ObjType::Task => {
+
+            ObjType::String | ObjType::Task => {
                 unreachable!("non-gray object in gray list")
             }
         }
@@ -346,26 +295,20 @@ impl Heap {
 
     fn trace_children(&mut self, obj: GCPtr) {
         match obj.ty() {
-            ObjType::PtrArray => {
-                let arr = obj.as_ref::<ObjArray>();
-                for v in arr.iter() {
-                    self.mark_object(v.get());
-                }
+            ObjType::Buffer => {
+                obj.as_ref::<GCBuffer>()
+                    .iter()
+                    .filter_map(|v| v.try_get())
+                    .for_each(|p| self.mark_object(p));
             }
-            ObjType::PtrList => {
-                let list = obj.as_ref::<ObjList>();
-                for v in list.iter() {
-                    self.mark_object(v.get());
-                }
-            }
-            ObjType::PtrStruct => {
-                let st = obj.as_ref::<ObjStruct>();
-                for ptr in st.iter().filter_map(|v| v.try_get()) {
-                    self.mark_object(ptr);
-                }
+            ObjType::DynBuffer => {
+                obj.as_ref::<GCDynBuffer>()
+                    .iter()
+                    .filter_map(|v| v.try_get())
+                    .for_each(|p| self.mark_object(p));
             }
             ObjType::Task => todo!("trace task children"),
-            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {}
+            ObjType::String => {}
         }
     }
 
@@ -431,17 +374,16 @@ impl Heap {
         unsafe {
             // Safety: The object is cast to the correct type before dropping
             match obj.ty() {
-                ObjType::Array | ObjType::PtrArray => obj.as_ptr::<ObjArray>().drop_in_place(),
-                ObjType::List | ObjType::PtrList => obj.as_ptr::<ObjList>().drop_in_place(),
-                ObjType::Struct | ObjType::PtrStruct => obj.as_ptr::<ObjStruct>().drop_in_place(),
-                ObjType::String => obj.as_ptr::<ObjString>().drop_in_place(),
-                ObjType::Task => obj.as_ptr::<ObjTask>().drop_in_place(),
+                ObjType::Buffer => obj.as_ptr::<GCBuffer>().drop_in_place(),
+                ObjType::DynBuffer => obj.as_ptr::<GCDynBuffer>().drop_in_place(),
+                ObjType::String => obj.as_ptr::<GCString>().drop_in_place(),
+                ObjType::Task => obj.as_ptr::<GCTask>().drop_in_place(),
             }
 
             // Safety:
             // This pointer came from this allocator.
-            // The layout of this memory is cached in the header.
-            self.allocator.free(obj.as_ptr::<u8>(), layout);
+            // The layout of this memory block is cached in the header.
+            self.allocator.free(obj.as_ptr(), layout);
         }
 
         self.bytes_allocated = self.bytes_allocated.saturating_sub(size);
@@ -495,7 +437,7 @@ impl Heap {
     }
 
     /// Backward barrier - marks parent gray again
-    /// Used for: table/array/struct writes during Propagate phase
+    /// Used for: buffer/dyn_buffer writes during Propagate phase
     pub fn barrier_back(&mut self, mut parent: GCPtr) {
         if self.gc_state == GCState::Pause || !parent.hdr().color.is_black() {
             return;
@@ -504,26 +446,22 @@ impl Heap {
         parent.hdr_mut().color = GCColor::Gray;
 
         match parent.ty() {
-            ObjType::PtrArray => {
-                parent.as_mut::<ObjArray>().gc_list = self.gray_again;
+            ObjType::Buffer => {
+                parent.as_mut::<GCBuffer>().gc_list = self.gray_again;
                 self.gray_again = Some(parent);
             }
-            ObjType::PtrList => {
-                parent.as_mut::<ObjList>().gc_list = self.gray_again;
+            ObjType::DynBuffer => {
+                parent.as_mut::<GCDynBuffer>().gc_list = self.gray_again;
                 self.gray_again = Some(parent);
             }
-            ObjType::PtrStruct => {
-                parent.as_mut::<ObjStruct>().gc_list = self.gray_again;
-                self.gray_again = Some(parent);
-            }
-            ObjType::String | ObjType::Array | ObjType::List | ObjType::Struct => {}
+            ObjType::String => {}
             ObjType::Task => todo!("task barrier_back"),
         }
     }
 
-    /// Table barrier - special handling for PropagateAgain phase
+    /// Buffer barrier - special handling for PropagateAgain phase
     /// During PropagateAgain, use forward barrier; otherwise backward
-    pub fn barrier_table(&mut self, parent: GCPtr, child: GCPtr) {
+    pub fn barrier_buffer(&mut self, parent: GCPtr, child: GCPtr) {
         if self.gc_state == GCState::Pause {
             return;
         }

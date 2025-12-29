@@ -101,41 +101,35 @@ value! {
 pub enum ObjType {
     /// Used to indicate that the object block is free
     //Null,
-    Array,
-    List,
-    Struct,
+    Buffer,
+    DynBuffer,
     String,
     Task,
-
-    // GC Objects that hold pointers
-    PtrArray,
-    PtrList,
-    PtrStruct,
 }
 
 #[repr(C)]
-pub struct ObjArray {
+pub struct GCBuffer {
     header: GCHeader,
     pub gc_list: Option<GCPtr>,
-    len: usize,
+    size: usize,
     data: [Value; 0],
 }
 
-impl ObjArray {
+impl GCBuffer {
     const _ASSERT: () = assert!(align_of::<Self>() == align_of::<Value>());
 
-    pub fn new(header: GCHeader, len: usize) -> Self {
+    pub fn new(header: GCHeader, size: usize) -> Self {
         Self {
             header,
-            len,
             gc_list: None,
+            size,
             data: [],
         }
     }
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.len
+        self.size
     }
 
     #[inline(always)]
@@ -145,12 +139,12 @@ impl ObjArray {
 
     #[inline(always)]
     pub fn as_slice(&self) -> &[Value] {
-        unsafe { std::slice::from_raw_parts(self.data(), self.len as usize) }
+        unsafe { std::slice::from_raw_parts(self.data(), self.size as usize) }
     }
 
     #[inline(always)]
     pub fn as_slice_mut(&mut self) -> &mut [Value] {
-        unsafe { std::slice::from_raw_parts_mut(self.data(), self.len) }
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.size) }
     }
 
     pub fn iter(&'_ self) -> Iter<'_, Value> {
@@ -159,18 +153,18 @@ impl ObjArray {
 }
 
 #[repr(C)]
-pub(super) struct ObjList {
+pub(super) struct GCDynBuffer {
     header: GCHeader,
     pub gc_list: Option<GCPtr>,
     data: Vec<Value>,
 }
 
-impl ObjList {
-    pub fn new(header: GCHeader, elems: &[Value]) -> Self {
+impl GCDynBuffer {
+    pub fn new(header: GCHeader) -> Self {
         Self {
             header,
             gc_list: None,
-            data: elems.iter().copied().collect(),
+            data: vec![],
         }
     }
 
@@ -191,55 +185,17 @@ impl ObjList {
 }
 
 #[repr(C)]
-pub(super) struct ObjStruct {
-    header: GCHeader,
-    pub gc_list: Option<GCPtr>,
-    size_in_words: usize,
-    fields: [Value; 0],
-}
-
-impl ObjStruct {
-    const _ASSERT: () = assert!(align_of::<Self>() == align_of::<Value>());
-
-    pub fn new(header: GCHeader, size_in_words: usize) -> Self {
-        Self {
-            header,
-            gc_list: None,
-            size_in_words,
-            fields: [],
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn fields_ptr(&self) -> *mut Value {
-        self.fields.as_ptr().cast_mut()
-    }
-
-    #[inline(always)]
-    pub fn fields(&self) -> &[Value] {
-        unsafe { std::slice::from_raw_parts(self.fields_ptr(), self.size_in_words) }
-    }
-
-    #[inline(always)]
-    pub fn fields_mut(&self) -> &mut [Value] {
-        unsafe { std::slice::from_raw_parts_mut(self.fields_ptr(), self.size_in_words) }
-    }
-
-    #[inline(always)]
-    pub fn iter(&self) -> Iter<'_, Value> {
-        self.fields().iter()
-    }
-}
-
-#[repr(C)]
-pub(super) struct ObjString {
+pub(super) struct GCString {
     header: GCHeader,
     data: String,
 }
 
-impl ObjString {
-    pub fn new(header: GCHeader, data: String) -> Self {
-        Self { header, data }
+impl GCString {
+    pub fn new(header: GCHeader) -> Self {
+        Self {
+            header,
+            data: String::new(),
+        }
     }
 
     #[inline(always)]
@@ -254,12 +210,12 @@ impl ObjString {
 }
 
 #[repr(C)]
-pub(super) struct ObjTask {
+pub(super) struct GCTask {
     pub(super) header: GCHeader,
     pub(super) data: Task,
 }
 
-impl ObjTask {
+impl GCTask {
     pub fn new(header: GCHeader, data: Task) -> Self {
         Self { header, data }
     }

@@ -5,7 +5,7 @@ use ahash::{AHashMap, AHashSet};
 use crate::vm::{
     Frame,
     heap::GCPtr,
-    object::{ObjTask, Value},
+    object::{GCTask, Value},
     unit::CallInfo,
 };
 
@@ -46,25 +46,25 @@ impl Scheduler {
     }
 
     pub(super) fn suspend(&mut self, mut task: GCPtr, reason: WaitReason) {
-        task.as_mut::<ObjTask>().get_mut().status = TaskStatus::Waiting;
+        task.as_mut::<GCTask>().get_mut().status = TaskStatus::Waiting;
         self.waiting.insert(task, reason);
     }
 
     pub(super) fn complete(&mut self, mut task: GCPtr) {
-        task.as_mut::<ObjTask>().get_mut().status = TaskStatus::Completed;
+        task.as_mut::<GCTask>().get_mut().status = TaskStatus::Completed;
         self.completed.insert(task);
         self.wake_waiters(task);
     }
 
     pub(super) fn cancel(&mut self, mut task: GCPtr) -> bool {
-        match task.as_ref::<ObjTask>().get().status {
+        match task.as_ref::<GCTask>().get().status {
             TaskStatus::Completed => return false,
             TaskStatus::Cancelled => return true,
             TaskStatus::Waiting => _ = self.waiting.remove(&task),
             TaskStatus::Ready => {}
         }
 
-        task.as_mut::<ObjTask>().get_mut().status = TaskStatus::Cancelled;
+        task.as_mut::<GCTask>().get_mut().status = TaskStatus::Cancelled;
         self.completed.insert(task);
         true
     }
@@ -82,7 +82,7 @@ impl Scheduler {
 
         for mut task in to_wake {
             self.waiting.remove(&task);
-            task.as_mut::<ObjTask>().get_mut().status = TaskStatus::Ready;
+            task.as_mut::<GCTask>().get_mut().status = TaskStatus::Ready;
             self.ready_queue.push_back(task);
         }
     }

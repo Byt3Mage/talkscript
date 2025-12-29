@@ -1,5 +1,7 @@
-use super::tokens::Span;
-use crate::arena::{Arena, Ident, StrSymbol};
+use crate::{
+    arena::{Arena, Ident, StrSymbol},
+    compiler::tokens::Span,
+};
 
 slotmap::new_key_type! {
     pub struct ExprId;
@@ -13,8 +15,8 @@ pub struct AstArena {
     pub exprs: Arena<ExprId, Expr>,
     pub stmts: Arena<StmtId, Stmt>,
     pub items: Arena<ItemId, Item>,
-    pub patterns: Arena<PatternId, Pattern>,
     pub types: Arena<AstTypeId, AstType>,
+    pub patterns: Arena<PatternId, Pattern>,
 }
 
 impl AstArena {
@@ -23,10 +25,16 @@ impl AstArena {
             exprs: Arena::with_key(),
             stmts: Arena::with_key(),
             items: Arena::with_key(),
-            patterns: Arena::with_key(),
             types: Arena::with_key(),
+            patterns: Arena::with_key(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum GenericArg {
+    Type(AstTypeId),
+    Const(ExprId),
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +46,7 @@ pub struct Path {
 #[derive(Debug, Clone)]
 pub struct PathSegment {
     pub name: Ident,
-    pub type_args: Vec<AstTypeId>,
+    pub args: Vec<GenericArg>,
     pub span: Span,
 }
 
@@ -87,27 +95,13 @@ pub enum AstTypeKind {
     Infer,
 
     // struct { x: int, y: int }
-    AnonStruct(Vec<AnonField>),
+    AnonStruct(Vec<Field>),
 
     // union { ok: int, err: cstr }
-    AnonUnion(Vec<AnonField>),
+    AnonUnion(Vec<Field>),
 
     // enum { Red, Green, Blue }
-    AnonEnum(Vec<AnonEnumVariant>),
-}
-
-#[derive(Debug, Clone)]
-pub struct AnonField {
-    pub name: Ident,
-    pub ty: AstTypeId,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnonEnumVariant {
-    pub name: Ident,
-    pub value: Option<ExprId>,
-    pub span: Span,
+    AnonEnum(Vec<Variant>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,6 +114,7 @@ impl GenericParams {
         Self { params: vec![] }
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.params.is_empty()
     }
@@ -159,7 +154,7 @@ pub enum ExprKind {
     Float(f64),
     Bool(bool),
     Char(char),
-    CStr(StrSymbol),
+    Cstr(StrSymbol),
     Void,
 
     // x, std::math::sqrt, Option::<int>
@@ -509,14 +504,6 @@ pub enum ItemKind {
         ty: AstTypeId,
     },
 
-    // impl Point { ... }
-    // impl<T> List<T> { ... }
-    Impl {
-        generics: GenericParams,
-        self_ty: AstTypeId,
-        items: Vec<ItemId>,
-    },
-
     // import std::math;
     // import {math, constants} from std;
     Import(Import),
@@ -591,7 +578,7 @@ impl Path {
         Self {
             segments: vec![PathSegment {
                 name,
-                type_args: vec![],
+                args: vec![],
                 span,
             }],
             span,
@@ -599,14 +586,10 @@ impl Path {
     }
 
     pub fn is_single(&self) -> bool {
-        self.segments.len() == 1 && self.segments[0].type_args.is_empty()
+        self.segments.len() == 1 && self.segments[0].args.is_empty()
     }
 
     pub fn as_single(&self) -> Option<Ident> {
-        if self.is_single() {
-            Some(self.segments[0].name)
-        } else {
-            None
-        }
+        self.is_single().then(|| self.segments[0].name)
     }
 }

@@ -6,7 +6,7 @@ use crate::vm::{
     async_runtime::{Scheduler, Task, WaitReason},
     heap::{GCPtr, Heap},
     instruction::*,
-    object::{AsValue, ObjTask, Value},
+    object::{AsValue, GCTask, Value},
     unit::{CallInfo, FuncInfo, NativeFuncInfo, Unit},
 };
 
@@ -59,8 +59,8 @@ struct Frame {
 
 pub struct VM {
     // VM state
-    call_stack: Vec<Frame>,
     regs: Vec<Value>,
+    call_stack: Vec<Frame>,
     native_call_ret: Box<[Value; u8::MAX as usize]>,
     heap: Heap,
 
@@ -83,7 +83,7 @@ impl VM {
         self.regs.clear();
         self.call_stack.clear();
         self.base_reg = 0;
-        todo!("reset heap")
+        todo!("reset heap");
     }
 
     #[inline(always)]
@@ -422,29 +422,29 @@ impl VM {
     pub fn exec_await(&mut self, i: Instruction) -> VMResult<bool> {
         let mut ptr = self.scheduler.current_task.ok_or(VMError::IllegalAwait)?;
 
-        if ptr.as_ref::<ObjTask>().get().is_cancelled() {
+        if ptr.as_ref::<GCTask>().get().is_cancelled() {
             return Err(VMError::TaskCancelled);
         }
 
         let task: GCPtr = self.reg(i.b()).get();
 
-        if task.as_ref::<ObjTask>().get().is_complete() {
+        if task.as_ref::<GCTask>().get().is_complete() {
             //TODO: copy results into caller registers
             return Ok(true);
         }
 
         self.scheduler.suspend(ptr, WaitReason::AwaitingTask(task));
 
-        let task = ptr.as_mut::<ObjTask>().get_mut();
+        let task = ptr.as_mut::<GCTask>().get_mut();
         std::mem::swap(&mut self.regs, &mut task.registers);
         std::mem::swap(&mut self.call_stack, &mut task.call_stack);
         task.base_reg = self.base_reg;
-        task.pc = self.pc - 1; // PC pushed back so await is retried on resume
+        task.pc = self.pc - 1; // pc pushed back so await is retried on resume
 
         Ok(false)
     }
 
-    fn run<const ASYNC: bool>(&mut self) -> VMResult<Option<Frame>> {
+    fn run<const SYNC: bool>(&mut self) -> VMResult<Option<Frame>> {
         while self.pc < self.bytecode.len() {
             let i = self.bytecode[self.pc];
             self.pc += 1;
@@ -502,7 +502,7 @@ impl VM {
                 }
                 Opcode::SPAWN => self.exec_spawn_task(i),
                 Opcode::AWAIT => {
-                    if !ASYNC {
+                    if SYNC {
                         return Err(VMError::IllegalAwait);
                     }
 
@@ -545,7 +545,7 @@ impl VM {
             callee_info: cinfo.clone(),
         });
 
-        match self.run::<false>()? {
+        match self.run::<true>()? {
             Some(frame) => {
                 let start = self.base_reg + frame.callee_info.ret_reg as usize;
                 let range = start..(start + frame.callee_info.nret as usize);

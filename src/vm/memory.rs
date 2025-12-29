@@ -114,6 +114,11 @@ impl SizeClassConfig {
 /// Global size class configuration
 pub static SIZE_CLASS_CONFIG: SizeClassConfig = SizeClassConfig::new();
 
+pub enum PageAllocError {
+    OutOfMemory,
+    InvalidSize,
+}
+
 type PagePtr = NonNull<Page>;
 
 /// A page of memory containing multiple blocks of the same size.
@@ -232,11 +237,6 @@ impl Page {
     pub fn is_full(&self) -> bool {
         !self.has_free_blocks()
     }
-}
-
-pub enum PageAllocError {
-    OutOfMemory,
-    InvalidSize,
 }
 
 impl Page {

@@ -1,7 +1,6 @@
-use crate::{
-    arena::{Arena, Ident},
-    compiler::ast::ItemId,
-};
+use std::rc::Rc;
+
+use crate::arena::{Arena, Ident};
 
 slotmap::new_key_type! {
     pub struct TypeId;
@@ -25,7 +24,7 @@ pub enum TypeValue {
     Optional(TypeId),
     Array { elem: TypeId, len: usize },
     Slice(TypeId),
-    Tuple(Vec<TypeId>),
+    Tuple(Rc<[TypeId]>),
 
     // User-defined
     Struct(StructInfo),
@@ -33,7 +32,7 @@ pub enum TypeValue {
     Enum(EnumInfo),
 
     // Functions
-    Function { params: Vec<TypeId>, ret: TypeId },
+    Function { params: Rc<[TypeId]>, ret: TypeId },
 
     // Placeholder for recursive types
     Incomplete,
@@ -42,22 +41,19 @@ pub enum TypeValue {
 #[derive(Debug, Clone)]
 pub struct StructInfo {
     pub name: Ident,
-    pub fields: Vec<FieldInfo>,
-    pub methods: Vec<ItemId>,
+    pub fields: Rc<[FieldInfo]>,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnionInfo {
     pub name: Ident,
-    pub fields: Vec<FieldInfo>, // each field is a variant
-    pub methods: Vec<ItemId>,
+    pub fields: Rc<[FieldInfo]>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnumInfo {
     pub name: Ident,
-    pub variants: Vec<VariantInfo>,
-    pub methods: Vec<ItemId>,
+    pub variants: Rc<[VariantInfo]>,
 }
 
 #[derive(Debug, Clone)]

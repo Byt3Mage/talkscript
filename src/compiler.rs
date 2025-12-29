@@ -5,6 +5,7 @@ mod parse_rules;
 mod parser;
 mod tokens;
 mod type_checker;
+mod type_error;
 mod type_info;
 
 #[cfg(test)]

@@ -6,9 +6,9 @@ use crate::{
     arena::{Ident, Interner},
     compiler::{
         ast::{
-            AstArena, AstTypeId, AstTypeKind, ExprId, ExprKind, Field, GenericParamKind,
-            GenericParams, ItemId, ItemKind, Path, PatternId, PatternKind, StmtId, StmtKind,
-            Variant,
+            AstArena, AstTypeId, AstTypeKind, ExprId, ExprKind, Field, GenericArg,
+            GenericParamKind, GenericParams, ItemId, ItemKind, Path, PatternId, PatternKind,
+            StmtId, StmtKind, Variant,
         },
         tokens::Span,
     },
@@ -246,16 +246,6 @@ impl<'a> NameResolver<'a> {
                     .new_scope(ScopeId::Item(item_id), ScopeKind::Function, Some(scope_id));
             }
 
-            ItemKind::Impl { items, .. } => {
-                let impl_scope = ScopeId::Item(item_id);
-                self.table
-                    .new_scope(impl_scope, ScopeKind::Impl, Some(scope_id));
-
-                for &inner_id in items {
-                    self.register_item(inner_id, impl_scope);
-                }
-            }
-
             ItemKind::Struct { .. }
             | ItemKind::Enum { .. }
             | ItemKind::Union { .. }
@@ -335,21 +325,6 @@ impl<'a> NameResolver<'a> {
                     .new_scope(alias_scope, ScopeKind::Type, Some(parent_scope));
                 self.resolve_generics(generics, alias_scope);
                 self.resolve_type(*ty, alias_scope);
-            }
-
-            ItemKind::Impl {
-                generics,
-                self_ty,
-                items,
-            } => {
-                let impl_scope = ScopeId::Item(item_id);
-
-                self.resolve_generics(generics, impl_scope);
-                self.resolve_type(*self_ty, impl_scope);
-
-                for &inner_id in items {
-                    self.resolve_item(inner_id, impl_scope);
-                }
             }
 
             ItemKind::Import(_) => {
@@ -472,7 +447,7 @@ impl<'a> NameResolver<'a> {
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Char(_)
-            | ExprKind::CStr(_)
+            | ExprKind::Cstr(_)
             | ExprKind::Void => {}
 
             ExprKind::Path(path) => {
@@ -859,8 +834,11 @@ impl<'a> NameResolver<'a> {
 
             // Resolve type arguments in all segments
             for segment in &path.segments {
-                for &ty_arg in &segment.type_args {
-                    self.resolve_type(ty_arg, scope_id);
+                for ty_arg in &segment.args {
+                    match ty_arg {
+                        GenericArg::Type(ty) => self.resolve_type(*ty, scope_id),
+                        GenericArg::Const(expr) => self.resolve_expr(*expr, scope_id),
+                    }
                 }
             }
         }

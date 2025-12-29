@@ -470,7 +470,7 @@ impl<'a> Parser<'a> {
         let str_token = self.expect(tt![str_lit])?;
 
         Ok(Expr {
-            kind: ExprKind::CStr(self.interner.get_or_intern(str_token.lexeme)),
+            kind: ExprKind::Cstr(self.interner.get_or_intern(str_token.lexeme)),
             span: str_token.span,
         })
     }
